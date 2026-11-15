@@ -1,0 +1,93 @@
+# service-watch 配置示例 — 与 DESIGN.md §4 schema 一一对应(2026-11-10)
+# 校验:monitor-agent --check-config <本文件>
+
+[agent]
+data_dir = "./data"                       # journal 目录(incident/重启事件/Fatal 闩锁)
+
+[log]
+json = false                              # true = 结构化 JSON 日志
+
+[control]                                 # 控制平面(monitorctl 依赖它)
+enabled = true
+listen = "127.0.0.1:9170"                 # 仅回环;改非回环需自行承担风险
+
+[collect]
+interval = "5s"                           # 全局采集间隔(硬件/进程快照)
+
+[alert]
+webhook_url = ""                          # 空 = 不投递(事件仍入 journal/日志)
+webhook_format = "json"                   # json = AlertEvent 原样;slack = {"text": 摘要}
+timeout = "10s"                           # 单次投递超时
+retries = 3                               # 指数退避重试(1s 起步 ×2,封顶 10s)
+renotify_interval = "15m"                 # 同 incident 持续期重复通知间隔
+failure_threshold = 3                     # 连续失败 → Critical
+success_threshold = 2                     # 连续成功 → 恢复(Resolve)
+flap_window = "30m"                       # flap 检测窗口
+flap_threshold = 5                        # 窗口内 open/close 达到即抑制
+deadman_url = ""                          # 可选心跳 POST;失败仅记日志
+
+[metrics]                                 # 指标周期投递(POST JSON MetricsReport;成功 = 2xx)
+enabled = false
+url = ""                                  # 空 = 仅 GET /metrics 暴露;单次尝试无重试,失败下轮覆盖
+interval = "60s"
+timeout = "10s"                           # 单次推送超时
+
+# ============ 检查目标(仅监控告警) ============
+
+[[check]]
+name = "example-http"
+kind = "http"                             # http | tcp | process
+url = "http://127.0.0.1:8080/healthz"     # http 必填
+expected_status = "200-299"               # 默认 200-299(含边界)
+interval = "10s"                          # 必须 > timeout(配置校验强制)
+timeout = "5s"
+
+# [[check]]
+# name = "example-tcp"
+# kind = "tcp"
+# addr = "127.0.0.1:5432"
+# interval = "10s"
+# timeout = "5s"
+
+# [[check]]
+# name = "example-process"
+# kind = "process"
+# process = "my-app"                      # 已配置 service/watch 名称或 "pid:1234"
+# cpu_threshold = 90.0                    # 与 mem_threshold_mb 至少一个
+# mem_threshold_mb = 1024
+# interval = "15s"
+# timeout = "5s"
+
+# ============ 监管目标(agent 拉活) ============
+
+[[service]]
+name = "example-app"
+command = "/usr/local/bin/example-app"    # supervise 必填;禁止 daemonize 型目标
+args = ["--port", "8080"]
+workdir = "/srv/example"
+env = { RUST_LOG = "info" }
+# depends_on = ["db"]                     # F20 启动编排:依赖全部 Running 后才拉起
+                                          # (引用必须存在;禁止自依赖与环)
+# console = false                         # Windows:true = 以新进程组启动并允许尝试 CTRL_BREAK(不保证生效)
+
+[service.restart]                         # 全部有默认值,可整体省略
+min_uptime = "10s"                        # 存活低于此即视为 crash loop 嫌疑
+backoff_initial = "1s"
+backoff_max = "60s"
+max_restarts = 5                          # 滑动窗口内最大自动重启次数
+restart_window = "10m"
+stop_grace = "15s"                        # graceful → 强杀升级时限
+startup_grace = "30s"                     # 预热期:失败不计入状态机
+confirmations = 2                         # 健康类失败触发恢复的确认次数
+hung_action = "restart"                   # restart | activate
+
+# [service.activate]                      # hung_action = "activate" 时必填
+# command = "/usr/local/bin/kick-app"     # command 与 url 二选一
+# timeout = "10s"                         # 激活钩子超时
+# verify_for = "30s"                      # 激活后观察期,仍失败转 Restart
+
+# ============ attach 目标(只监控,永不杀/重启) ============
+
+# [[watch]]
+# name = "systemd-nginx"
+# pidfile = "/run/nginx.pid"              # 或 pid = 1234

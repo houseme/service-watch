@@ -1,0 +1,126 @@
+# ============================================================================
+# service-watch — systemd 生产 unit(Linux)
+#
+# 安装:
+#   sudo cp service-watch.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now service-watch
+#
+# 占位符路径(按实际部署修改,或保持约定):
+#   /usr/local/bin/monitor-agent            — 二进制(cargo build --release 产物)
+#   /etc/service-watch/config.toml          — 配置文件
+#   /var/lib/service-watch                  — data_dir(journal.jsonl 所在,须可写)
+#
+# 设计对照(DESIGN.md):
+#   §1 原则 1(观察者外置)— 本 unit 只守护 agent 本体;KillMode=process 保证
+#      systemctl stop 时不连带清理被监管子进程(DESIGN §8.7:agent 停机时子进程
+#      默认保留)。
+#   §9.3 退出码 — SIGTERM/SIGINT 优雅停机,退出码 130(2026-11-11 接线,
+#      StopReason::Signal)。下方 SuccessExitStatus=130 令 systemd 把它视为
+#      干净退出,因此 Restart=on-failure 在人为 stop / 信号停机时不会拉起;
+#      仅在异常退出(配置错误=1、运行错误=2、崩溃信号)时重启,与"agent 由
+#      外部守护"一致,不使用 always 疯狂重启。
+# ============================================================================
+
+[Unit]
+Description=service-watch monitoring agent
+# network-online 属于"Wants 而非 Requires":网络子系统未就绪不应阻断 agent 启动
+# (agent 自身的检查状态机会处理探测失败,不需要 systemd 硬等)。
+Wants=network-online.target
+After=network-online.target
+
+# ---- 重启节流(DESIGN §1 原则 2 精神:策略显式化,拒绝无界重试) ----
+# StartLimitIntervalSec / StartLimitBurst 自 systemd v230 起属于 [Unit] 段
+# (更老版本放在 [Service] 段并名为 StartLimitInterval/StartLimitBurst)。
+# 语义:300s 窗口内最多 10 次失败重启;耗尽后单元进入 failed 状态并停止重启,
+# 需要 `systemctl reset-failed` 才能再次 start。典型触发场景是配置错误
+# (退出码 1)持续失败 —— 让它尽快"停在第 10 次"暴露问题,而不是无限循环。
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+# ---- 身份 ----
+# 专用系统账户创建方法(见本目录 README.md §2),务必让 data_dir 归属该账户:
+#   sudo useradd --system --user-group --home-dir /var/lib/service-watch \
+#                --shell /usr/sbin/nologin svcwatch      # RHEL 系为 /sbin/nologin
+#   sudo chown svcwatch:svcwatch /var/lib/service-watch
+User=svcwatch
+Group=svcwatch
+# 保守的文件创建掩码:journal 与目录不放宽到全局可读
+UMask=0027
+
+# ---- 启动 ----
+# Type=simple:agent 自行前台运行(不做 daemonize;DESIGN §8.4 明确禁止对被监管
+# 目标 daemonize,agent 本体同样前台化,交给 systemd 管生命周期)。
+Type=simple
+WorkingDirectory=/var/lib/service-watch
+# 启动前离线校验配置,配置错误(退出码 1)直接判启动失败,避免带着坏配置进入
+# 重启循环。校验失败会在 journalctl 中留下 `config error: ...` 明细。
+ExecStartPre=/usr/local/bin/monitor-agent --check-config /etc/service-watch/config.toml
+# 主进程。CLI 为顶层 flag 形态(DESIGN §9.1):--config / --log-json / --check-config。
+# 需要结构化日志采集(如 vector/loki)时可追加 --log-json(或改 config [log].json)。
+ExecStart=/usr/local/bin/monitor-agent --config /etc/service-watch/config.toml
+
+# ---- 日志等级 ----
+# RUST_LOG 为 tracing EnvFilter(默认 info,DESIGN §10)。恢复/告警/降级事件均
+# 为 INFO+,生产排查可临时 `systemctl edit` 加 override 设 RUST_LOG=debug,
+# 不要长期开 debug(DESIGN 日志纪律:禁止热路径 DEBUG 刷屏)。
+Environment=RUST_LOG=info
+
+# ---- 停止 ----
+# SIGTERM 语义(DESIGN §8.7):agent 停探测 → flush journal → 退出(信号停机
+# 退出码 130,DESIGN §9.3),被监管子进程**保留**。KillMode=process 让 systemd
+# 只对主进程发信号,不因 cgroup 收尾而 SIGKILL 孤儿子进程 —— 这是"观察者外置"
+# 在 systemd 上的落地开关(默认 control-group 会清空整个 cgroup,违背原则 1)。
+KillMode=process
+KillSignal=SIGTERM
+# agent 捕获 SIGTERM 后主动 exit(130)。systemd 默认只把 0 视为成功,非零退出
+# 会让 `systemctl stop` 后单元状态记为 failed;声明 130 为干净退出,stop/restart
+# 才不残留 failed 状态(与 Restart=on-failure 也不打架)。
+SuccessExitStatus=130
+# agent 自身退出很快(停探测 + flush 单文件 journal),30s 上限已远超需要;
+# 若 journal 所在为慢速网络盘可适当调大。
+TimeoutStopSec=30s
+
+# ---- 失败重启(与启动节流配合) ----
+# on-failure 覆盖:非零退出(配置错误 1 / 运行错误 2)、被信号杀死、超时。
+# 不覆盖:干净退出(0,以及 SuccessExitStatus 声明的 130 —— 人为 stop、
+# SIGTERM 停机)→ 重启不会打架。
+Restart=on-failure
+# 5s 退避:与 config 的 backoff_initial 量级一致,给下游(被监控目标、webhook
+# 接收端)留喘息窗口;真正快速连续失败由 [Unit] 的 StartLimit 兜底熔断。
+RestartSec=5s
+
+# ---- 安全加固 ----
+# 每项解释:
+# NoNewPrivileges     — 进程及其子进程不得通过 setuid/sudo/file capabilities 提权。
+# ProtectSystem=strict— 整个文件系统层级(/usr /boot /etc /…)对 agent 只读。
+# ReadWritePaths      — 唯一例外:data_dir(journal.jsonl 必须可写)。
+#                       若 [agent].data_dir 改了路径,这里必须同步修改。
+# ProtectHome         — /home /root /run/user 不可见,防误读用户数据。
+# PrivateTmp          — 独立 /tmp(与宿主及其他服务隔离)。注意:被监管子进程
+#                       继承同一私有 /tmp;若某被监管服务需要与 unit 外进程通过
+#                       /tmp 交换文件,需评估后关闭此项。
+# 以下为可选进一步收紧(默认不启用 —— agent 会 spawn 任意被监管服务,过紧的
+# 沙箱可能破坏目标进程的正常运行;按需启用并回归测试):
+# ProtectKernelTunables=true
+# ProtectControlGroups=true
+# ProtectKernelModules=true
+# RestrictSUIDSGID=true
+# RestrictRealtime=true
+# LockPersonality=true
+# RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6   # agent 自身够用;被监管目标可能需要更多
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/service-watch
+ProtectHome=true
+PrivateTmp=true
+
+# ---- 资源边界(可选,按机器规格调整) ----
+# agent 自身 CPU 预算:<2% 单核(5s 采集间隔,ROADMAP F3 验收线)。
+# MemoryMax 对 Rust 常驻进程保守即可;超限被 OOM kill 属于 Restart=on-failure 范畴。
+# MemoryMax=512M
+# CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target

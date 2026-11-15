@@ -1,0 +1,8 @@
+/target
+/data
+*.local.toml
+config.local.toml
+.idea/
+.vscode/
+*.swp
+.DS_Store

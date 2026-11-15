@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  service-watch — macOS LaunchDaemon(/Library/LaunchDaemons/)
+
+  安装(需 root,plist 文件权限必须是 root:wheel 0644,否则 launchd 拒载):
+    sudo cp com.houseme.service-watch.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/com.houseme.service-watch.plist
+    sudo chmod 644        /Library/LaunchDaemons/com.houseme.service-watch.plist
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.houseme.service-watch.plist
+  详细步骤、验证与卸载见同目录 README.md。
+
+  —— KeepAlive 语义(对照 `man launchd.plist`,DESIGN.md §1 原则 1)——
+
+  字典形态的多个条件是 **OR** 关系:任一条件成立即重启。
+
+  * SuccessfulExit = false:仅在**上一次退出码非零**时重启。
+    agent 收到 SIGTERM/SIGINT 是优雅停机、退出码 130(DESIGN §9.3,2026-11-11
+    接线):`launchctl bootout` 卸载 job 后 KeepAlive 不再适用,不会拉起;
+    但 job 保持加载期间收到的外部 SIGTERM(如 `launchctl kill SIGTERM`)以 130
+    退出 → 视为非零,ThrottleInterval 后拉起(守护语义,预期行为)。配置错误
+    (退出码 1)、运行错误(退出码 2)等非零退出同样重启 —— 与 systemd 的
+    Restart=on-failure + SuccessExitStatus=130 语义对齐,刻意不用 KeepAlive=true
+    (那是"无条件保活",连 exit 0 都拉起,相当于被滥用的 Restart=always)。
+  * Crashed = true:进程被信号杀死(SIGKILL/OOM kill 等)视为 crash 并重启。
+  * ThrottleInterval = 5:两次拉起之间至少 5 秒,防止"起不来 → 疯狂重启"占用
+    CPU(man page:exit quickly and frequently 的 job 会被节流)。配合第 1 条:
+    持续配置错误表现为 5s 一次的低速重试,日志中会留下明确的 config error。
+
+  —— "agent 崩溃不被监控对象拉起 / 对象崩溃不连带 agent"(观察者外置,双向)——
+
+  本 KeepAlive 只描述 **agent 本体**的生命周期:agent 崩溃由 launchd 拉起,
+  与任何被监控/被监管对象无关;被监管服务崩溃由 agent 内部恢复状态机处理
+  (DESIGN §8.2),也不会触发或阻止本 job 的重启。Unix 侧 agent 的被监管子进程
+  运行在独立进程组(DESIGN §8.4 process_group(0)),agent 被杀后子进程保留运行
+  (DESIGN §8.7);AbandonProcessGroup=true 进一步声明 launchd 在 job 退出时
+  不清理相关进程组 —— 与 systemd unit 的 KillMode=process 同一意图。
+
+  —— RunAtLoad ——
+  选 true 并说明:man launchd.plist 明言 KeepAlive "implicitly implies RunAtLoad,
+  causing launchd to speculatively launch the job",因此只要配置了 KeepAlive,
+  无论 RunAtLoad 写什么,加载/开机时都会拉起一次。显式写 true 是让声明与实际
+  行为一致:监控 agent 需要开机即守(否则重启后存在无人监控的窗口),而
+  "避免开机即拉起"的意图在 KeepAlive 存在时本就不可达 —— 若确需"先备好配置
+  再启动"的流程,应在 bootstrap 之前完成 --check-config,而不是指望关掉
+  RunAtLoad(bootstrap 本身就会触发启动)。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.houseme.service-watch</string>
+
+    <!-- ProgramArguments 必须是数组形态(逐个参数一个 <string>)。
+         CLI 为顶层 flag 形态(DESIGN §9.1),无 `run` 子命令。
+         --log-json 输出结构化日志便于 jq/采集器解析;删除该行则为人读格式。 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/monitor-agent</string>
+        <string>--config</string>
+        <string>/etc/service-watch/config.toml</string>
+        <string>--log-json</string>
+    </array>
+
+    <!-- 见文件头注释:KeepAlive 已隐含 RunAtLoad,显式 true 使意图无歧义。 -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 只在"非零退出"(含信号停机的 130)或"被信号杀死"时重启;
+         仅退出码 0 不重启。OR 关系。 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- 最小重启间隔(秒),等价 systemd RestartSec=5s。 -->
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <!-- tracing EnvFilter(DESIGN §10,默认 info)。排查临时改 debug。 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <!-- stdout/stderr 落盘(launchd 代持文件句柄)。目录须已存在且可写:
+         sudo mkdir -p /var/log/service-watch -->
+    <key>StandardOutPath</key>
+    <string>/var/log/service-watch/agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/service-watch/agent.err.log</string>
+
+    <!-- job 退出时让 launchd 放弃其进程组的收尾权,不连带清理 agent 创建的
+         进程组(与 systemd KillMode=process 对应,保护被监管子进程)。 -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <!-- 可选:降权运行。LaunchDaemon 默认以 root 运行;若指定专用账户,
+         /etc/service-watch/config.toml(可读)与 /var/lib/service-watch、
+         /var/log/service-watch(可写)的属主必须同步调整,且被监管子进程将
+         继承该身份 —— 与 systemd 的 svcwatch 账户同理。macOS 建专用账户:
+         sudo sysadminctl -addUser svcwatch -password - -admin:false
+         <key>UserName</key>
+         <string>svcwatch</string>
+         <key>GroupName</key>
+         <string>svcwatch</string>
+    -->
+
+    <!-- 可选:工作目录(agent 默认配置路径 ./service-watch.toml 基于 cwd;
+         本 unit 已显式传 --config,不依赖 cwd,可不设置)
+         <key>WorkingDirectory</key>
+         <string>/var/lib/service-watch</string>
+    -->
+</dict>
+</plist>

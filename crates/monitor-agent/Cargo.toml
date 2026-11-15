@@ -1,0 +1,36 @@
+[package]
+name = "monitor-agent"
+description = "service-watch monitoring agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# feature 与 monitor-core 对齐(passthrough;default-features = false 以便
+# `--no-default-features` 真正裁掉 reqwest/axum,见 docs/deploy/windows README §1
+# 的降级构建与 DESIGN §6.5 交叉验收线)。
+[features]
+default = ["collect-sysinfo", "probe-http", "notify-webhook", "control-http"]
+collect-sysinfo = ["monitor-core/collect-sysinfo"]
+collect-deep-hardware = ["monitor-core/collect-deep-hardware"]
+probe-http = ["monitor-core/probe-http"]
+notify-webhook = ["monitor-core/notify-webhook"]
+control-http = ["monitor-core/control-http"]
+# F15:Windows Service 形态(SCM 感知)。仅 cfg(windows) 下拉入依赖,
+# 其余 target 上该 feature 为空集(service 模块走"平台不支持"桩)。
+windows-service = ["dep:windows-service"]
+
+[dependencies]
+monitor-core = { path = "../monitor-core", default-features = false }
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# SCM 集成(service.rs):dispatcher + control handler;SERVICE_CONTROL_STOP 经
+# monitor_core::runtime::request_shutdown()(F15 进程内停机请求)转成优雅停机,
+# 不依赖 console 事件注入 —— 故本 crate 不再需要 windows-sys。
+windows-service = { workspace = true, optional = true }
+
+[package.metadata.notes]
+constraints = "edition 2024 / no rust-version / Apache-2.0 (AGENT.md)"

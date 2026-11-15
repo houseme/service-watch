@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = ["crates/monitor-core", "crates/monitor-agent", "crates/monitorctl"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "time",
+    "sync",
+    "macros",
+    "signal",
+    "process",
+    "net",
+    "io-util",
+    "fs",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+thiserror = "2"
+tracing = "0.1"
+url = { version = "2", features = ["serde"] }
+async-trait = "0.1"
+sysinfo = "0.40"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+libc = "0.2"
+windows-sys = "0.61"
+# F15 Windows Service 形态(仅 monitor-agent 声明使用)。虚拟 workspace 清单不允许
+# [target.*] 节,optional 也只能在成员清单声明 —— 版本在此集中,target-gating 与
+# optional 由 monitor-agent 自己的 [target.'cfg(windows)'.dependencies] 完成
+# (与 monitor-core 的 windows-sys 声明方式一致)。
+# 版本核对日期:2026-11-11(cargo search windows-service --registry crates-io → 0.8.1)。
+windows-service = "0.8.1"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

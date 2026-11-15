@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<!--
+  F22 service-watch 只读状态页(经 include_str! 编译期嵌入 agent 控制平面,GET /)。
+  零外部依赖:无 CDN/字体/图标/框架,内联 CSS 与 JS。
+  页面严格只读:不提供任何写操作入口;数据仅来自 GET /status 与 GET /metrics(JSON)。
+  安全约定:所有插值一律经 escapeHtml(target 名等来自配置,可能含 <>'"&)。
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>service-watch</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0e1420;
+    --panel: #161d2c;
+    --fg: #e6e9f0;
+    --muted: #8a93a6;
+    --border: #26304a;
+    --ok: #2ea043;
+    --warn: #d29922;
+    --crit: #f85149;
+    --fatal-bg: #b62324;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px 24px 40px;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 18px;
+  }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .5px; }
+  .sub { color: var(--muted); font-size: 12px; margin-left: 10px; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .chip-ok { border-color: var(--ok); color: var(--ok); }
+  .chip-warn { border-color: var(--warn); color: var(--warn); }
+  .chip-crit { border-color: var(--crit); color: var(--crit); }
+  .chip-fatal { background: var(--fatal-bg); border-color: var(--fatal-bg); color: #fff; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 18px;
+  }
+  .panel h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    margin: 0 0 12px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+  }
+  .cell { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+  .cell .label { font-size: 11px; color: var(--muted); }
+  .cell .value { font-size: 20px; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+  td.num { text-align: right; }
+  td.empty, .dim { color: var(--muted); }
+  tr:last-child td { border-bottom: none; }
+  tr.row-fatal td { background: rgba(248, 81, 73, .12); }
+  .badge {
+    display: inline-block;
+    padding: 1px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid;
+  }
+  .badge-ok { color: var(--ok); border-color: var(--ok); background: rgba(46, 160, 67, .12); }
+  .badge-warn { color: var(--warn); border-color: var(--warn); background: rgba(210, 153, 34, .12); }
+  .badge-crit { color: var(--crit); border-color: var(--crit); background: rgba(248, 81, 73, .14); }
+  .chip-state { padding: 1px 9px; font-size: 12px; }
+  footer { color: var(--muted); font-size: 12px; }
+  /* 刷新失败:保留上次数据,整体变灰(agent unreachable 徽章保持醒目)。 */
+  body.stale .panel, body.stale footer { opacity: .55; filter: grayscale(.85); }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6f8;
+      --panel: #ffffff;
+      --fg: #1c2333;
+      --muted: #64708a;
+      --border: #dde1ea;
+    }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>service-watch</h1><span class="sub">read-only status page</span>
+  </div>
+  <div class="chips">
+    <span id="reach" class="chip">connecting&hellip;</span>
+    <span id="ready" class="chip">&mdash;</span>
+    <span id="uptime" class="chip">uptime &mdash;</span>
+  </div>
+</header>
+
+<section class="panel">
+  <h2>metrics</h2>
+  <div class="grid">
+    <div class="cell"><div class="label">probe executed</div><div class="value" id="m-probe-executed">&mdash;</div></div>
+    <div class="cell"><div class="label">probe skipped</div><div class="value" id="m-probe-skipped">&mdash;</div></div>
+    <div class="cell"><div class="label">alerts sent</div><div class="value" id="m-alerts-sent">&mdash;</div></div>
+    <div class="cell"><div class="label">alert delivery failures</div><div class="value" id="m-alert-failures">&mdash;</div></div>
+    <div class="cell"><div class="label">restarts total</div><div class="value" id="m-restarts">&mdash;</div></div>
+    <div class="cell"><div class="label">degradations now</div><div class="value" id="m-degraded-now">&mdash;</div></div>
+    <div class="cell"><div class="label">degradation events</div><div class="value" id="m-degraded-events">&mdash;</div></div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>targets</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>name</th><th>mode</th><th>health</th><th>recovery</th><th>identity</th><th class="num">restarts</th>
+      </tr>
+    </thead>
+    <tbody id="target-rows">
+      <tr><td colspan="6" class="empty">no data yet</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>auto-refreshes every 2s &middot; data: GET /status, GET /metrics</footer>
+<noscript><p class="dim">JavaScript is required for live data.</p></noscript>
+
+<script>
+(function () {
+  "use strict";
+
+  var REFRESH_MS = 2000;
+  var ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+  // 所有插值(名称/模式/级别等来自配置,可能含 <>"'&)必须经此转义,防 XSS。
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, function (ch) { return ESCAPES[ch]; });
+  }
+
+  function el(id) { return document.getElementById(id); }
+  function num(v) { return typeof v === "number" && isFinite(v) ? v : 0; }
+  function textOf(v) { return v == null ? "\u2014" : String(v); }
+
+  function setChip(node, label, cls) {
+    node.textContent = label;
+    node.className = "chip " + cls;
+  }
+
+  function formatUptime(secs) {
+    secs = Math.max(0, Math.floor(num(secs)));
+    var d = Math.floor(secs / 86400);
+    var h = Math.floor((secs % 86400) / 3600);
+    var m = Math.floor((secs % 3600) / 60);
+    var s = secs % 60;
+    var parts = [];
+    if (d) { parts.push(d + "d"); }
+    if (d || h) { parts.push(h + "h"); }
+    if (d || h || m) { parts.push(m + "m"); }
+    parts.push(s + "s");
+    return parts.join(" ");
+  }
+
+  function healthClass(level) {
+    if (level === "ok") { return "ok"; }
+    if (level === "warning") { return "warn"; }
+    return "crit";
+  }
+
+  function renderMetrics(m) {
+    el("m-probe-executed").textContent = String(num(m.probe_executed));
+    el("m-probe-skipped").textContent = String(num(m.probe_skipped));
+    el("m-alerts-sent").textContent = String(num(m.alerts_sent));
+    el("m-alert-failures").textContent = String(num(m.alert_delivery_failures));
+    el("m-restarts").textContent = String(num(m.restarts_total));
+    el("m-degraded-now").textContent = String(num(m.degradations_current));
+    el("m-degraded-events").textContent = String(num(m.degradations_events));
+  }
+
+  function renderTargets(status) {
+    var targets = (status && status.targets) || [];
+    var rows = "";
+    if (!targets.length) {
+      rows = '<tr><td colspan="6" class="empty">no targets reported</td></tr>';
+    }
+    for (var i = 0; i < targets.length; i++) {
+      var t = targets[i] || {};
+      var recovery = t.recovery == null ? "" : String(t.recovery);
+      var fatal = recovery === "fatal";
+      var identity = t.identity
+        ? "pid " + escapeHtml(t.identity.pid) + " \u00b7 start " + escapeHtml(t.identity.start_time)
+        : "\u2014";
+      rows += '<tr' + (fatal ? ' class="row-fatal"' : "") + ">"
+        + "<td>" + escapeHtml(textOf(t.name)) + "</td>"
+        + "<td>" + escapeHtml(textOf(t.mode)) + "</td>"
+        + '<td><span class="badge badge-' + healthClass(String(t.health)) + '">'
+        + escapeHtml(textOf(t.health)) + "</span></td>"
+        + "<td>" + (recovery
+            ? '<span class="chip chip-state' + (fatal ? " chip-fatal" : "") + '">'
+              + escapeHtml(recovery) + "</span>"
+            : '<span class="dim">\u2014</span>')
+          + "</td>"
+        + "<td>" + identity + "</td>"
+        + '<td class="num">' + num(t.restarts_in_window) + "</td>"
+        + "</tr>";
+    }
+    el("target-rows").innerHTML = rows;
+  }
+
+  function render(status, metrics) {
+    setChip(
+      el("ready"),
+      status.ready ? "ready" : "not ready",
+      status.ready ? "chip-ok" : "chip-warn"
+    );
+    // uptime 以 eval 单调源(metrics.uptime_secs)为准;缺失时由 started_at 推导。
+    var up = metrics ? metrics.uptime_secs : null;
+    if (up == null && status.started_at && status.started_at.secs_since_epoch != null) {
+      up = Math.max(0, Math.floor(Date.now() / 1000 - status.started_at.secs_since_epoch));
+    }
+    el("uptime").textContent = up == null ? "uptime \u2014" : "uptime " + formatUptime(up);
+    renderMetrics(metrics || {});
+    renderTargets(status);
+  }
+
+  function setReachable(ok) {
+    if (ok) {
+      setChip(el("reach"), "live", "chip-ok");
+      document.body.classList.remove("stale");
+    } else {
+      // 保留上次成功数据,只标记不可达并变灰。
+      setChip(el("reach"), "agent unreachable", "chip-crit");
+      document.body.classList.add("stale");
+    }
+  }
+
+  function fetchJson(path) {
+    return fetch(path).then(function (r) {
+      if (!r.ok) { throw new Error(path + " -> " + r.status); }
+      return r.json();
+    });
+  }
+
+  function refresh() {
+    return Promise.all([fetchJson("/status"), fetchJson("/metrics")])
+      .then(function (results) {
+        render(results[0], results[1]);
+        setReachable(true);
+      })
+      .catch(function () {
+        setReachable(false);
+      });
+  }
+
+  setInterval(refresh, REFRESH_MS);
+  refresh();
+})();
+</script>
+</body>
+</html>
