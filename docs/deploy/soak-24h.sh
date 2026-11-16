@@ -15,7 +15,8 @@ set -uo pipefail
 BIN_SRC="${BIN_SRC:-./target/release/monitor-agent}"
 SECONDS_TOTAL="${1:-86400}"
 PORT=19199
-ROOT="${SOAK_DIR:-/var/tmp/sw-soak-24h}"
+# 教训(第一次长跑被 /var/tmp 系统清理器抹掉):默认必须用持久目录
+ROOT="${SOAK_DIR:-$HOME/.local/state/sw-soak-24h}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 RUN_DIR="$ROOT/$STAMP"
 LOG="$RUN_DIR/soak.log"
