@@ -33,7 +33,9 @@ service-watch/
 │   ├── monitor-agent/      # bin:clap 入口 → tracing → monitor_core::run()
 │   └── monitorctl/         # bin:控制平面客户端 + 本地 dump-snapshot
 ├── config/config.example.toml
-└── .github/workflows/ci.yml
+└── .github/workflows/
+    ├── ci.yml              # lint / constraints / test / cross-check
+    └── release.yml         # tag 触发四平台发布构建,产物上传 GitHub Release
 ```
 
 ## 4. 能力线责任映射

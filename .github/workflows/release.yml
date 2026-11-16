@@ -1,0 +1,138 @@
+# 发布构建:tag 推送触发,四平台交叉产出二进制压缩包并创建 GitHub Release。
+#
+# 触发方式:
+#   1. 把根 Cargo.toml [workspace.package].version 改为目标版本(verify-tag 强制一致)
+#   2. git tag v0.2.0 && git push origin v0.2.0
+#
+# 矩阵(与 ci.yml 平台口径一致):
+#   - x86_64-unknown-linux-gnu / aarch64-apple-darwin / x86_64-apple-darwin:
+#     默认 feature + collect-deep-hardware(Linux hwmon、macOS AppleSMC 深度采集;
+#     发布二进制统一带上,省去用户按需重编)。
+#   - x86_64-pc-windows-msvc:额外启用 windows-service(F15 agent 自身 SCM 形态)
+#     与 monitor-core/scm-target(原生 Windows Service 目标恢复);TLS 栈为
+#     rustls + aws-lc-rs(reqwest 0.13 无 ring 备选),需 NASM + CMake。
+#
+# 扩展位:Linux aarch64 需 cross(ghcr.io/cross-rs)+ 目标侧 gcc/perl,暂未纳入。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # gh release create 上传产物
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify-tag:
+    # tag 必须与 workspace 版本一致:产物 --version 取自 Cargo.toml,
+    # 不一致时先改根 Cargo.toml 再打 tag,避免 v0.2.0 的包内报 0.1.0。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ws="$(cargo metadata --format-version 1 | jq -r '.packages[] | select(.source == null and .name == "monitor-agent") | .version')"
+          if [ "$tag" != "$ws" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 workspace 版本 ${ws} 不一致 —— 先把根 Cargo.toml [workspace.package].version 改为 ${tag} 再打 tag"
+            exit 1
+          fi
+          echo "tag 校验通过:${GITHUB_REF_NAME} == ${ws}"
+
+  build:
+    needs: verify-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            agent_features: collect-deep-hardware
+          - os: macos-latest # arm64 runner,x86_64 为交叉目标(rustup target)
+            target: aarch64-apple-darwin
+            agent_features: collect-deep-hardware
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            agent_features: collect-deep-hardware
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            agent_features: windows-service,monitor-core/scm-target,collect-deep-hardware
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # aws-lc-sys 构建链依赖;CMake 4 移除 <3.5 兼容,需显式放行(与 ci.yml 同口径)
+      - if: runner.os == 'Windows'
+        run: choco install -y nasm cmake
+      - if: runner.os == 'Windows'
+        run: echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV
+      - name: build
+        shell: bash
+        run: |
+          cargo build --release -p monitor-agent --target ${{ matrix.target }} --features "${{ matrix.agent_features }}"
+          cargo build --release -p monitorctl --target ${{ matrix.target }} --features collect-deep-hardware
+      - name: stage
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          pkg="service-watch-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${pkg}"
+          bin="target/${{ matrix.target }}/release"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "${bin}/monitor-agent.exe" "${bin}/monitorctl.exe" "dist/${pkg}/"
+            cp docs/deploy/windows/install-service.ps1 "dist/${pkg}/"
+          else
+            cp "${bin}/monitor-agent" "${bin}/monitorctl" "dist/${pkg}/"
+            mkdir -p "dist/${pkg}/deploy"
+            cp docs/deploy/systemd/service-watch.service "dist/${pkg}/deploy/"
+            cp docs/deploy/launchd/com.houseme.service-watch.plist "dist/${pkg}/deploy/"
+          fi
+          cp config/config.example.toml "dist/${pkg}/"
+          echo "pkg=${pkg}" >> "$GITHUB_ENV"
+      - name: package (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar -czf "dist/${pkg}.tar.gz" -C dist "${pkg}"
+      - name: package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "dist/${env:pkg}" -DestinationPath "dist/${env:pkg}.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
+      # 重跑工作流时 tag 已存在:改走 upload --clobber 覆盖产物
+      - name: create or update release
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "service-watch ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
