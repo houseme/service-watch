@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# F17 性能预算验证脚本(ROADMAP v0.2)— macOS/Linux
-# 度量 agent 在合成负载下的 CPU(阈值:< 2% 单核)与 RSS 变化(泄漏指示),
-# 输出 PASS/FAIL 结论。24h 长跑仍需人工执行(本脚本是快速回归门)。
+# F17 性能预算验证脚本 (ROADMAP v0.2)— macOS/Linux
+# 度量 agent 在合成负载下的 CPU(阈值:< 2% 单核) 与 RSS 变化 (泄漏指示),
+# 输出 PASS/FAIL 结论。24h 长跑仍需人工执行 (本脚本是快速回归门)。
 #
-# 用法: docs/deploy/perf-check.sh [二进制路径] [持续秒数,默认 60]
-# 依赖: bash、ps、curl、awk;合成目标和探测均使用本地地址
+# 用法：docs/deploy/perf-check.sh [二进制路径] [持续秒数，默认 60]
+# 依赖：bash、ps、curl、awk;合成目标和探测均使用本地地址
 
 set -euo pipefail
 
@@ -44,7 +44,7 @@ cleanup() {
   if (( result == 0 )); then
     rm -rf "$SMOKE_DIR"
   else
-    echo "保留本次验证日志: $SMOKE_DIR/agent.log" >&2
+    echo "保留本次验证日志：$SMOKE_DIR/agent.log" >&2
   fi
   exit "$result"
 }
@@ -56,7 +56,7 @@ trap 'exit 143' TERM
   echo '持续秒数必须是至少 10 的整数' >&2
   exit 2
 }
-[[ -x "$BIN" ]] || { echo "二进制不可执行: $BIN(cargo build --release -p monitor-agent)"; exit 2; }
+[[ -x "$BIN" ]] || { echo "二进制不可执行：$BIN(cargo build --release -p monitor-agent)"; exit 2; }
 
 # pid 文件和唯一脚本路径用于只清理本次派生进程组。
 cat > "$SMOKE_DIR/sleeper.sh" <<EOF
@@ -66,7 +66,7 @@ sleep 86400 &
 wait
 EOF
 
-# ---- 合成配置:1 个 http 自检 + 1 个 supervise + 1 个 tcp 探测(稳定负载)----
+# ---- 合成配置:1 个 http 自检 + 1 个 supervise + 1 个 tcp 探测 (稳定负载)----
 cat > "$SMOKE_DIR/config.toml" <<EOF
 [agent]
 data_dir = "$SMOKE_DIR/data"
@@ -99,7 +99,7 @@ echo "== 启动 agent(负载:${DURATION}s)=="
 "$BIN" --config "$SMOKE_DIR/config.toml" > "$SMOKE_DIR/agent.log" 2>&1 &
 AGENT_PID=$!
 
-# 等待 ready(就绪后才开始度量,排除启动期)
+# 等待 ready(就绪后才开始度量，排除启动期)
 READY=0
 for ((attempt = 0; attempt < 50; attempt++)); do
   kill -0 "$AGENT_PID" 2>/dev/null || { echo 'agent 提前退出' >&2; exit 2; }
@@ -115,7 +115,7 @@ CPU_SAMPLES=()
 RSS_SAMPLES=()
 INTERVAL=5
 for ((elapsed = 0; elapsed < DURATION; elapsed += INTERVAL)); do
-  # ps %cpu 使用平台 ps 的累计/衰减均值语义,此处记录其采样均值与 RSS 趋势。
+  # ps %cpu 使用平台 ps 的累计/衰减均值语义，此处记录其采样均值与 RSS 趋势。
   # 短时尖峰和 24h 稳态泄漏需要长跑与进一步分析。
   CPU_SAMPLES+=("$(ps -o %cpu= -p "$AGENT_PID" | tr -d ' ')")
   RSS_SAMPLES+=("$(ps -o rss= -p "$AGENT_PID" | tr -d ' ')")
@@ -133,18 +133,18 @@ RSS_MAX=$(printf '%s\n' "${RSS_SAMPLES[@]}" | sort -n | tail -1)
 RSS_GROWTH=$(( RSS_LAST - RSS_FIRST ))
 
 echo "== 结果 =="
-echo "CPU(生命周期均值): ${CPU_AVG}%   阈值: < 2%"
-echo "RSS: 首 ${RSS_FIRST}KB → 末 ${RSS_LAST}KB(增长 ${RSS_GROWTH}KB,峰值 ${RSS_MAX}KB)"
-echo "采样序列: ${CPU_SAMPLES[*]}"
+echo "CPU(生命周期均值): ${CPU_AVG}%   阈值：< 2%"
+echo "RSS: 首 ${RSS_FIRST}KB → 末 ${RSS_LAST}KB(增长 ${RSS_GROWTH}KB，峰值 ${RSS_MAX}KB)"
+echo "采样序列：${CPU_SAMPLES[*]}"
 
 VERDICT=0
 awk -v c="$CPU_AVG" 'BEGIN { exit !(c < 2.0) }' || { echo "FAIL: CPU 超预算"; VERDICT=1; }
-# RSS 增长 > 20MB 视为疑似泄漏(合成负载下应近零)
+# RSS 增长 > 20MB 视为疑似泄漏 (合成负载下应近零)
 (( RSS_GROWTH < 20480 )) || { echo "FAIL: RSS 增长异常"; VERDICT=1; }
 
 if (( VERDICT == 0 )); then
-  echo "PASS: 性能预算内(F17 快速门;24h 长跑另测)"
+  echo "PASS: 性能预算内 (F17 快速门;24h 长跑另测)"
 else
-  echo "agent 日志: $SMOKE_DIR/agent.log"
+  echo "agent 日志：$SMOKE_DIR/agent.log"
 fi
 exit "$VERDICT"

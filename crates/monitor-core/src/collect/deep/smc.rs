@@ -1,9 +1,9 @@
-//! AppleSMC 只读用户客户端。IOKit ABI 由本机 SDK IOKitLib.h 核对,
-//! SMC wire 布局/类型由 sysinfo 0.40.1 和 Stats SMC 实现交叉核对(2026-11-12)。
+//! AppleSMC 只读用户客户端。IOKit ABI 由本机 SDK IOKitLib.h 核对，
+//! SMC wire 布局/类型由 sysinfo 0.40.1 和 Stats SMC 实现交叉核对 (2026-11-12)。
 //! https://github.com/exelban/stats/blob/master/SMC/smc.swift
 //!
-//! 每轮仅探测固定候选键,不枚举全部 SMC keyspace。服务或键不可用即降级,
-//! 不写入任何控制键、不要求提权。连接在本轮结束后关闭,下轮自然重试。
+//! 每轮仅探测固定候选键，不枚举全部 SMC keyspace。服务或键不可用即降级，
+//! 不写入任何控制键、不要求提权。连接在本轮结束后关闭，下轮自然重试。
 
 use std::ffi::{c_char, c_void};
 use std::mem::{offset_of, size_of};
@@ -11,9 +11,9 @@ use std::mem::{offset_of, size_of};
 use super::Readings;
 use crate::model::snapshot::{DeepSensorKind, FanSpeed, SensorUnavailableReason, Voltage};
 
-/// 选定 SMC 电脑供电轨的验读范围。±100 V 是宽松的低压供电可信界,
-/// 用于拒绝类型解码正确但数量级异常的读数,并非某一机型的硬件额定值。
-/// 保留 0 V(电源门控)与负电压轨。未知单位的整数编码在应用本范围前直接拒绝。
+/// 选定 SMC 电脑供电轨的验读范围。±100 V 是宽松的低压供电可信界，
+/// 用于拒绝类型解码正确但数量级异常的读数，并非某一机型的硬件额定值。
+/// 保留 0 V(电源门控) 与负电压轨。未知单位的整数编码在应用本范围前直接拒绝。
 const SMC_VOLTAGE_ABS_LIMIT: f32 = 100.0;
 
 #[repr(C)]
@@ -61,7 +61,7 @@ struct KeyData {
     bytes: [u8; 32],
 }
 
-// AppleSMC 外部方法要求固定 wire 布局,两种 macOS 架构均需满足。
+// AppleSMC 外部方法要求固定 wire 布局，两种 macOS 架构均需满足。
 const _: () = assert!(size_of::<KeyData>() == 80);
 const _: () = assert!(offset_of!(KeyData, result) == 40);
 const _: () = assert!(offset_of!(KeyData, bytes) == 48);
@@ -221,14 +221,14 @@ impl Value {
 
     fn volts(&self) -> Option<f32> {
         // V 前缀不足以证明数值单位。实机 VBUS 是 ui32/01000000,属于未证实
-        // 电压单位的整数数据,不能作为 16,777,216 V 输出。仅接受具备已核对
-        // 电压编码约定的浮点/定点类型,其长度与有限性仍由 number 验证。
+        // 电压单位的整数数据，不能作为 16,777,216 V 输出。仅接受具备已核对
+        // 电压编码约定的浮点/定点类型，其长度与有限性仍由 number 验证。
         match self.data_type {
             [b'f' | b's', b'p', _, _] | [b'f', b'l', b't', b' '] => {}
             _ => return None,
         }
         let value = self.number()?;
-        // fpe2 电压使用 mV,其它受支持的 fp/sp/flt 电压使用 V。
+        // fpe2 电压使用 mV，其它受支持的 fp/sp/flt 电压使用 V。
         let volts = if self.data_type == *b"fpe2" {
             value / 1000.0
         } else {
@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn smc_voltage_requires_known_units_and_trusted_magnitude() {
-        // 当前主机 VBUS 的原始类型/内容。整数能解码,物理单位没有电压合同。
+        // 当前主机 VBUS 的原始类型/内容。整数能解码，物理单位没有电压合同。
         let vbus = value(*b"ui32", &[0x01, 0x00, 0x00, 0x00]);
         assert_eq!(vbus.number(), Some(16_777_216.0));
         assert!(vbus.volts().is_none());

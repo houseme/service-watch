@@ -1,4 +1,4 @@
-//! 探测执行(DESIGN.md §7.1)。所有探测被 `tokio::time::timeout` 包裹,超时 = 失败。
+//! 探测执行 (DESIGN.md §7.1)。所有探测被 `tokio::time::timeout` 包裹，超时 = 失败。
 
 use crate::config::{CheckCfg, CheckKindCfg};
 use crate::model::snapshot::ProcessSnapshot;
@@ -6,7 +6,7 @@ use crate::model::snapshot::ProcessSnapshot;
 /// 单次探测结果。
 #[derive(Debug, Clone)]
 pub enum ProbeResult {
-    /// 观测能力暂不可用,本轮不推进健康状态机。
+    /// 观测能力暂不可用，本轮不推进健康状态机。
     Unavailable {
         reason: String,
     },
@@ -37,13 +37,13 @@ impl ProbeResult {
     }
 }
 
-/// 探测上下文:HTTP 客户端(http probe)与目标进程最新快照(process probe)。
+/// 探测上下文:HTTP 客户端 (http probe) 与目标进程最新快照 (process probe)。
 pub struct ProbeCtx<'a> {
     #[cfg(feature = "probe-http")]
     pub http: Option<&'a reqwest::Client>,
-    /// process 检查目标的最新快照;`None` = 快照缺失(视为失败,PID 复用防护)。
+    /// process 检查目标的最新快照;`None` = 快照缺失 (视为失败，PID 复用防护)。
     pub process_snapshot: Option<&'a ProcessSnapshot>,
-    /// 期望匹配的进程身份(可选;用于校验快照属于该目标)。
+    /// 期望匹配的进程身份 (可选;用于校验快照属于该目标)。
     pub expected_identity: Option<&'a crate::model::ids::ProcessIdentity>,
 }
 
@@ -142,7 +142,7 @@ fn run_process_check(
     mem_threshold_mb: Option<u64>,
     ctx: ProbeCtx<'_>,
 ) -> ProbeResult {
-    let _ = process; // 名称解析由 eval 完成,这里只消费已解析身份
+    let _ = process; // 名称解析由 eval 完成，这里只消费已解析身份
     let Some(snap) = ctx.process_snapshot else {
         return ProbeResult::Fail {
             reason: "process not found in latest snapshot".into(),

@@ -1,12 +1,12 @@
-//! 告警 spool 落盘(ROADMAP F12,at-least-once)。
+//! 告警 spool 落盘 (ROADMAP F12,at-least-once)。
 //!
 //! 失败事件追加到 `{data_dir}/spool/pending.jsonl`,启动/周期重试时始终保留
-//! 磁盘副本,收到通知器成功确认后再原子更新文件。进程在确认前崩溃会重复投递。
-//! 超过 [`SPOOL_MAX_AGE`] 的事件按保留期丢弃,坏行原样保留并记 WARN。
+//! 磁盘副本，收到通知器成功确认后再原子更新文件。进程在确认前崩溃会重复投递。
+//! 超过 [`SPOOL_MAX_AGE`] 的事件按保留期丢弃，坏行原样保留并记 WARN。
 //!
-//! 同目录追加和重放通过共享互斥串行执行。同步磁盘事务持有互斥许可,
-//! 外层任务取消后仍保留许可直到系统调用完成,防止晚到的 rename 覆盖新记录。
-//! I/O 错误保留原文件并记录日志,追加成功包含 flush + sync_data。
+//! 同目录追加和重放通过共享互斥串行执行。同步磁盘事务持有互斥许可，
+//! 外层任务取消后仍保留许可直到系统调用完成，防止晚到的 rename 覆盖新记录。
+//! I/O 错误保留原文件并记录日志，追加成功包含 flush + sync_data。
 
 use std::collections::HashMap;
 use std::io::{Read as _, Seek as _, Write as _};
@@ -16,16 +16,16 @@ use std::time::{Duration, SystemTime};
 
 use crate::model::alert::AlertEvent;
 
-/// spool 单文件名(目录由 runtime 传入:`{data_dir}/spool`)。
+/// spool 单文件名 (目录由 runtime 传入:`{data_dir}/spool`)。
 pub const SPOOL_FILE: &str = "pending.jsonl";
-/// spool 事件最长保留期(重放时超龄丢弃)。
+/// spool 事件最长保留期 (重放时超龄丢弃)。
 pub const SPOOL_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
-/// 周期重放的节拍(分发任务内)。
+/// 周期重放的节拍 (分发任务内)。
 pub const SPOOL_REQUEUE_INTERVAL: Duration = Duration::from_secs(60);
-/// 每次启动/周期重放最多尝试的事件数(限制单轮积压处理量)。
+/// 每次启动/周期重放最多尝试的事件数 (限制单轮积压处理量)。
 pub const SPOOL_REQUEUE_BATCH: usize = 16;
 
-/// 同一进程内、同一路径的运行实例共享许可,Weak 条目在后续调用时清理。
+/// 同一进程内、同一路径的运行实例共享许可，Weak 条目在后续调用时清理。
 async fn directory_guard(directory: &Path) -> std::io::Result<tokio::sync::OwnedMutexGuard<()>> {
     type DirectoryLocks = Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>;
     static LOCKS: OnceLock<DirectoryLocks> = OnceLock::new();
@@ -53,7 +53,7 @@ async fn directory_guard(directory: &Path) -> std::io::Result<tokio::sync::Owned
     Ok(lock.lock_owned().await)
 }
 
-/// 追加一条事件到 spool 文件,成功包含 sync_data 确认。
+/// 追加一条事件到 spool 文件，成功包含 sync_data 确认。
 pub async fn append(spool_dir: &Path, event: &AlertEvent) -> bool {
     let mut line = match serde_json::to_vec(event) {
         Ok(line) => line,
@@ -79,7 +79,7 @@ pub async fn append(spool_dir: &Path, event: &AlertEvent) -> bool {
             .read(true)
             .append(true)
             .open(directory.join(SPOOL_FILE))?;
-        // 隔离中断写入的尾行,后续完整事件保持独立可解析。
+        // 隔离中断写入的尾行，后续完整事件保持独立可解析。
         if file.metadata()?.len() > 0 {
             file.seek(std::io::SeekFrom::End(-1))?;
             let mut last = [0_u8; 1];
@@ -108,7 +108,7 @@ pub async fn append(spool_dir: &Path, event: &AlertEvent) -> bool {
 /// 重放结果。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReplayStats {
-    /// 成功确认的事件数量(兼容原回队 helper 的字段名)。
+    /// 成功确认的事件数量 (兼容原回队 helper 的字段名)。
     pub requeued: usize,
     pub attempted: usize,
     pub failed: usize,
@@ -118,7 +118,7 @@ pub struct ReplayStats {
 
 /// 将 spool 的所有权交给同步回调。调用方须在返回前可靠地接管事件。
 /// 产品分发路径使用 [`replay_deliver`],其成功确认发生在通知器完成之后。
-/// `max_events` 为本次尝试数上限,0 表示全部。
+/// `max_events` 为本次尝试数上限，0 表示全部。
 pub async fn replay(
     spool_dir: &Path,
     now: SystemTime,
@@ -132,9 +132,9 @@ pub async fn replay(
     .await
 }
 
-/// 直接重试磁盘事件,回调返回 true 才确认移除。false 保留原行供下次重试。
-/// 文件在全部异步回调结束前保持原样,取消或崩溃会保留未确认磁盘副本。
-/// 持有同目录许可直到本轮确认完成,回调不得再次调用同目录 spool 操作。
+/// 直接重试磁盘事件，回调返回 true 才确认移除。false 保留原行供下次重试。
+/// 文件在全部异步回调结束前保持原样，取消或崩溃会保留未确认磁盘副本。
+/// 持有同目录许可直到本轮确认完成，回调不得再次调用同目录 spool 操作。
 pub async fn replay_deliver<F, Fut>(
     spool_dir: &Path,
     now: SystemTime,
@@ -207,7 +207,7 @@ where
                     retry.push(b'\n');
                     continue;
                 }
-                // 未尝试事件留在前面,失败项移到末尾避免永久坏 payload 饿死后续事件。
+                // 未尝试事件留在前面，失败项移到末尾避免永久坏 payload 饿死后续事件。
                 remain.extend_from_slice(line);
                 remain.push(b'\n');
             }
@@ -225,7 +225,7 @@ where
     }
     remain.extend_from_slice(&retry);
     let update_path = path.clone();
-    // 整笔磁盘事务持有许可直到完成,取消异步等待不会提前解锁。
+    // 整笔磁盘事务持有许可直到完成，取消异步等待不会提前解锁。
     let update = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         let _guard = guard;
         if remain.is_empty() {
@@ -236,7 +236,7 @@ where
     })
     .await;
     if !matches!(update, Ok(Ok(()))) {
-        tracing::warn!(path = %path.display(), result = ?update, "spool: 确认文件更新失败,下轮可能重复投递");
+        tracing::warn!(path = %path.display(), result = ?update, "spool: 确认文件更新失败，下轮可能重复投递");
     }
     stats
 }
@@ -263,7 +263,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::SystemTime;
 
-    /// `age_secs` = 距今的年龄(锚定真实 now;过期判定按 `last_seen` 距 now)。
+    /// `age_secs` = 距今的年龄 (锚定真实 now;过期判定按 `last_seen` 距 now)。
     fn event(occ: u64, age_secs: u64) -> AlertEvent {
         let last_seen = SystemTime::now()
             .checked_sub(Duration::from_secs(age_secs))
@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(s.requeued, 1);
         assert_eq!(s.corrupt_lines, 1);
         let kept = std::fs::read_to_string(dir.join(SPOOL_FILE)).unwrap();
-        assert_eq!(kept.trim(), "{not json}", "坏行原样保留(不吞数据)");
+        assert_eq!(kept.trim(), "{not json}", "坏行原样保留 (不吞数据)");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

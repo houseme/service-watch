@@ -4,6 +4,12 @@ description = "Cross-platform service & hardware monitoring library"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
+authors.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/monitor-core"
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = ["collect-sysinfo", "probe-http", "notify-webhook", "control-http"]
@@ -13,9 +19,9 @@ http-client = ["dep:reqwest"]
 probe-http = ["http-client"]
 notify-webhook = ["http-client"]
 control-http = ["dep:axum"]
-# ROADMAP「原生 Windows Service 目标恢复」:SCM 目标启停/状态查询(windows.rs 的
-# RealScmOps)。默认不开 → 默认构建零影响;仅在 cfg(windows) 下拉起依赖,
-# 非 Windows 平台启用本 feature 是无害空操作(运行时诚实降级为错误)。
+# ROADMAP「原生 Windows Service 目标恢复」:SCM 目标启停/状态查询 (windows.rs 的
+# RealScmOps)。默认不开 → 默认构建零影响;仅在 cfg(windows) 下拉起依赖，
+# 非 Windows 平台启用本 feature 是无害空操作 (运行时诚实降级为错误)。
 scm-target = ["dep:windows-service"]
 
 [dependencies]
@@ -41,8 +47,8 @@ windows-sys = { workspace = true, features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
-# SCM 目标(windows_service 配置字段)的高层 API;scm-target feature 门控,
-# 版本与 monitor-agent 的 F15 服务形态共用 workspace 声明(0.8.1)。
+# SCM 目标 (windows_service 配置字段) 的高层 API;scm-target feature 门控，
+# 版本与 monitor-agent 的 F15 服务形态共用 workspace 声明 (0.8.1)。
 windows-service = { workspace = true, optional = true }
 
 [dev-dependencies]

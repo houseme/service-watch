@@ -1,4 +1,4 @@
-//! 统一错误类型(DESIGN.md §5)。
+//! 统一错误类型 (DESIGN.md §5)。
 
 use thiserror::Error;
 

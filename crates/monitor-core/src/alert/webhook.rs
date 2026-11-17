@@ -1,4 +1,4 @@
-//! Webhook 通知器(feature `notify-webhook`)。Slack 兼容与通用 JSON 双格式。
+//! Webhook 通知器 (feature `notify-webhook`)。Slack 兼容与通用 JSON 双格式。
 //! 格式枚举统一定义在 [`crate::config::WebhookFormat`](配置层的单一事实源)。
 
 use async_trait::async_trait;
@@ -19,7 +19,7 @@ impl WebhookNotifier {
     pub fn new(url: url::Url, format: WebhookFormat, timeout: Duration) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(timeout)
-            // 禁用重定向(评审 P2):reqwest 默认跟随 10 跳,301/303 会把告警
+            // 禁用重定向 (评审 P2):reqwest 默认跟随 10 跳，301/303 会把告警
             // POST 降级为 GET 发往新目标 —— 告警可能"成功"投到错误端点。
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -107,7 +107,7 @@ mod tests {
         );
     }
 
-    /// JSON 格式:AlertEvent 原样序列化(字段完整)。
+    /// JSON 格式:AlertEvent 原样序列化 (字段完整)。
     #[test]
     fn json_payload_is_full_event() {
         let body = notifier(WebhookFormat::Json).render(&sample());

@@ -2,17 +2,19 @@
 //!
 //! 子命令:`status [--json]` / `restart|check|reset <target>` / `metrics [--prom]` /
 //! `dump-snapshot [--config <path>]` / `watch [--interval <secs>] [--json] [--exit-on-error]`。
-//! `--url <addr>` 为全局参数(默认 http://127.0.0.1:9170)。
+//! `--url <addr>` 为全局参数 (默认 http://127.0.0.1:9170)。
 //!
-//! 退出码(DESIGN §9.3):0 成功;2 运行错误(含 409/非 2xx 响应);3 目标不存在
-//! (v0.1 agent 端点不校验 target,固定 202,本码预留);4 agent 不可达。
-//! monitorctl 自身日志默认静默:仅当设置 RUST_LOG 才初始化 tracing(输出到 stderr)。
+//! 退出码 (DESIGN §9.3):0 成功;2 运行错误 (含 409/非 2xx 响应);3 目标不存在
+//! (v0.1 agent 端点不校验 target，固定 202，本码预留);4 agent 不可达。
+//! monitorctl 自身日志默认静默：仅当设置 RUST_LOG 才初始化 tracing(输出到 stderr)。
+//! watch 的轮询重试/内部警告经 `tracing::warn!` 输出(受 RUST_LOG 门控);
+//! 命令级致命错误(不可达、解码失败等)仍直接写 stderr,默认可见。
 //!
 //! `watch`(ROADMAP F19):客户端轮询 GET /status(不新增服务端端点),默认 ANSI 清屏
 //! 渲染与 `status` 相同的表格 + 顶部时间戳/轮询计数 + 底部 `last poll`(保留最近 5 条
 //! target/health/recovery 变化历史);`--json` 改为每轮输出一行紧凑 JSON(JSON Lines)。
-//! Ctrl-C 退出 0;agent 不可达默认 WARN 后继续重试,`--exit-on-error` 时立即退出
-//! (不可达 → 4,其余错误 → 2)。
+//! Ctrl-C 退出 0;agent 不可达默认 WARN 后继续重试，`--exit-on-error` 时立即退出
+//! (不可达 → 4，其余错误 → 2)。
 
 use std::collections::VecDeque;
 use std::io::Write as _;
@@ -23,7 +25,7 @@ use clap::{Parser, Subcommand};
 use monitor_core::model::control::{StatusReport, TargetStatus};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:9170";
-/// 单次 HTTP 请求超时(任务约定 5s)。
+/// 单次 HTTP 请求超时 (任务约定 5s)。
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
@@ -39,33 +41,33 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// 查看 target 状态摘要(GET /status)
+    /// 查看 target 状态摘要 (GET /status)
     Status {
         /// 原样输出 agent 返回的 JSON
         #[arg(long)]
         json: bool,
     },
-    /// 重启 supervise 目标(POST /v1/restart/{target};409 = Fatal,先 reset)
+    /// 重启 supervise 目标 (POST /v1/restart/{target};409 = Fatal，先 reset)
     Restart { target: String },
-    /// 立即触发一轮探测(POST /v1/check/{target})
+    /// 立即触发一轮探测 (POST /v1/check/{target})
     Check { target: String },
-    /// 解除 Fatal 闩锁并清空重启预算(POST /v1/reset/{target})
+    /// 解除 Fatal 闩锁并清空重启预算 (POST /v1/reset/{target})
     Reset { target: String },
-    /// 查看运行指标(GET /metrics;--prom 输出 Prometheus 文本)
+    /// 查看运行指标 (GET /metrics;--prom 输出 Prometheus 文本)
     Metrics {
-        /// Prometheus exposition 文本(供抓取器/人工核对)
+        /// Prometheus exposition 文本 (供抓取器/人工核对)
         #[arg(long)]
         prom: bool,
     },
     /// 本地单次采集输出 JSON(不经 agent;--config 仅做加载校验)
     DumpSnapshot {
-        /// 配置文件路径(加载失败按配置错误退出 1)
+        /// 配置文件路径 (加载失败按配置错误退出 1)
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
     },
-    /// 实时跟随 status 变化(轮询 GET /status;Ctrl-C 退出)
+    /// 实时跟随 status 变化 (轮询 GET /status;Ctrl-C 退出)
     Watch {
-        /// 轮询间隔秒数(≥1)
+        /// 轮询间隔秒数 (≥1)
         #[arg(
             long,
             value_name = "SECS",
@@ -73,10 +75,10 @@ enum Cmd {
             value_parser = clap::value_parser!(u64).range(1..)
         )]
         interval: u64,
-        /// 每次 poll 输出一行紧凑 JSON(JSON Lines,可被 jq 消费)
+        /// 每次 poll 输出一行紧凑 JSON(JSON Lines，可被 jq 消费)
         #[arg(long)]
         json: bool,
-        /// agent 不可达/响应错误时立即退出(默认 WARN 后继续重试)
+        /// agent 不可达/响应错误时立即退出 (默认 WARN 后继续重试)
         #[arg(long)]
         exit_on_error: bool,
     },
@@ -107,7 +109,7 @@ async fn main() {
 // ---------------------------------------------------------------------------
 
 /// 路径段 percent-encode(评审 P2:target 含 `/ ? # 空格` 会改变请求路径;
-/// 仅保留 RFC 3986 unreserved + `~`,其余转义,无新增依赖)。
+/// 仅保留 RFC 3986 unreserved + `~`,其余转义，无新增依赖)。
 fn percent_encode_path_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
@@ -121,8 +123,8 @@ fn percent_encode_path_segment(s: &str) -> String {
     out
 }
 
-/// `metrics`:GET /metrics;--prom 时请求 Prometheus 文本并原样输出,
-/// 否则 pretty JSON(按关键字段摘要 + 完整 JSON 两种形态?—— 输出完整 JSON)。
+/// `metrics`:GET /metrics;--prom 时请求 Prometheus 文本并原样输出，
+/// 否则 pretty JSON(按关键字段摘要 + 完整 JSON 两种形态？—— 输出完整 JSON)。
 async fn cmd_metrics(base: &str, prom: bool) -> i32 {
     let client = match build_client() {
         Ok(c) => c,
@@ -165,7 +167,7 @@ async fn cmd_metrics(base: &str, prom: bool) -> i32 {
     }
 }
 
-/// `status`:GET /status;人类可读表格,--json 原样输出。
+/// `status`:GET /status;人类可读表格，--json 原样输出。
 async fn cmd_status(base: &str, json: bool) -> i32 {
     let client = match build_client() {
         Ok(c) => c,
@@ -197,7 +199,7 @@ async fn cmd_status(base: &str, json: bool) -> i32 {
     0
 }
 
-/// /status 拉取错误(status 与 watch 共用);`exit_code` 按 DESIGN §9.3 映射。
+/// /status 拉取错误 (status 与 watch 共用);`exit_code` 按 DESIGN §9.3 映射。
 #[derive(Debug)]
 enum FetchStatusError {
     /// 连接/请求失败 → 4
@@ -287,7 +289,7 @@ async fn cmd_post(base: &str, op: &str, target: &str) -> i32 {
     }
 }
 
-/// `dump-snapshot`:本地单次采集(阻塞调用,一次性 CLI 可接受),不经 agent。
+/// `dump-snapshot`:本地单次采集 (阻塞调用，一次性 CLI 可接受),不经 agent。
 fn cmd_dump_snapshot(config: Option<&Path>) -> i32 {
     if let Some(path) = config
         && let Err(e) = monitor_core::config::Config::from_path(path)
@@ -311,7 +313,7 @@ fn cmd_dump_snapshot(config: Option<&Path>) -> i32 {
 // 输出与工具
 // ---------------------------------------------------------------------------
 
-/// /status 人类可读表格(name/mode/health/recovery/checks/restarts),
+/// /status 人类可读表格 (name/mode/health/recovery/checks/restarts),
 /// status 与 watch 共用;返回不带结尾换行的完整文本。
 fn render_status(report: &StatusReport) -> String {
     let mut out = format!(
@@ -343,21 +345,21 @@ fn render_status(report: &StatusReport) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// watch(ROADMAP F19):客户端轮询 GET /status,不新增服务端端点
+// watch(ROADMAP F19):客户端轮询 GET /status，不新增服务端端点
 // ---------------------------------------------------------------------------
 
-/// 变化历史保留条数(最近 5 条)。
+/// 变化历史保留条数 (最近 5 条)。
 const WATCH_CHANGE_HISTORY: usize = 5;
 
-/// `watch`:循环轮询 GET /status,实时跟随状态变化(ROADMAP F19)。
+/// `watch`:循环轮询 GET /status，实时跟随状态变化 (ROADMAP F19)。
 ///
-/// - 默认:每轮 ANSI 清屏(`\x1b[2J\x1b[H`)后渲染与 `status` 相同的表格
-///   ([`render_status`]),顶部时间戳/轮询计数,表尾保留最近 [`WATCH_CHANGE_HISTORY`]
-///   条 target/health/recovery 变化历史,底部 `last poll HH:MM:SS (n)`。
-/// - `--json`:每轮输出一行紧凑 JSON(JSON Lines,可被 jq 消费);WARN 只走 stderr,
+/// - 默认：每轮 ANSI 清屏 (`\x1b[2J\x1b[H`) 后渲染与 `status` 相同的表格
+///   ([`render_status`]),顶部时间戳/轮询计数，表尾保留最近 [`WATCH_CHANGE_HISTORY`]
+///   条 target/health/recovery 变化历史，底部 `last poll HH:MM:SS (n)`。
+/// - `--json`:每轮输出一行紧凑 JSON(JSON Lines，可被 jq 消费);WARN 只走 stderr,
 ///   不污染管道。
-/// - Ctrl-C → 0;错误默认 WARN 后继续重试,`--exit-on-error` 立即退出
-///   (不可达 → 4,其余 → 2,DESIGN §9.3)。
+/// - Ctrl-C → 0;错误默认 WARN 后继续重试，`--exit-on-error` 立即退出
+///   (不可达 → 4，其余 → 2,DESIGN §9.3)。
 async fn cmd_watch(base: &str, interval_secs: u64, json: bool, exit_on_error: bool) -> i32 {
     let client = match build_client() {
         Ok(c) => c,
@@ -378,9 +380,9 @@ async fn cmd_watch(base: &str, interval_secs: u64, json: bool, exit_on_error: bo
         poll += 1;
         let outcome = tokio::select! {
             res = &mut ctrl_c => {
-                // 注册失败实际不可达(仅 OS 级错误),仍按信号到达处理:退出 0。
+                // 注册失败实际不可达 (仅 OS 级错误),仍按信号到达处理：退出 0。
                 if let Err(e) = res {
-                    eprintln!("watch: ctrl-c handler error: {e}");
+                    tracing::warn!(error = %e, "watch: ctrl-c handler error");
                 }
                 return 0;
             }
@@ -393,7 +395,7 @@ async fn cmd_watch(base: &str, interval_secs: u64, json: bool, exit_on_error: bo
                         match serde_json::to_string(&report) {
                             Ok(line) => println!("{line}"),
                             Err(e) => {
-                                eprintln!("watch WARN (poll #{poll}): serialize report failed: {e}")
+                                tracing::warn!(poll, error = %e, "watch: serialize report failed")
                             }
                         }
                     } else {
@@ -435,7 +437,7 @@ async fn cmd_watch(base: &str, interval_secs: u64, json: bool, exit_on_error: bo
         tokio::select! {
             res = &mut ctrl_c => {
                 if let Err(e) = res {
-                    eprintln!("watch: ctrl-c handler error: {e}");
+                    tracing::warn!(error = %e, "watch: ctrl-c handler error");
                 }
                 return 0;
             }
@@ -444,8 +446,8 @@ async fn cmd_watch(base: &str, interval_secs: u64, json: bool, exit_on_error: bo
     }
 }
 
-/// watch 错误处置:--exit-on-error → 立即按 §9.3 退出(Some(code));
-/// 默认 WARN 后继续重试(None)。
+/// watch 错误处置:--exit-on-error → 立即按 §9.3 退出 (Some(code));
+/// 默认 WARN 后继续重试 (None)。
 fn watch_error(
     exit_on_error: bool,
     err: &FetchStatusError,
@@ -456,12 +458,12 @@ fn watch_error(
         eprintln!("watch: {err} — exiting (--exit-on-error, poll #{poll})");
         Some(err.exit_code())
     } else {
-        eprintln!("watch WARN (poll #{poll}): {err}; retrying in {interval_secs}s");
+        tracing::warn!(poll, error = %err, retry_in_secs = interval_secs, "watch: poll failed; retrying");
         None
     }
 }
 
-/// 追加一条带 `Δ HH:MM:SS` 时间戳的变化记录,保留最近 [`WATCH_CHANGE_HISTORY`] 条。
+/// 追加一条带 `Δ HH:MM:SS` 时间戳的变化记录，保留最近 [`WATCH_CHANGE_HISTORY`] 条。
 fn push_change(changes: &mut VecDeque<String>, desc: String, now_secs: u64) {
     changes.push_back(format!("Δ {} {desc}", fmt_hms(now_secs)));
     while changes.len() > WATCH_CHANGE_HISTORY {
@@ -469,10 +471,10 @@ fn push_change(changes: &mut VecDeque<String>, desc: String, now_secs: u64) {
     }
 }
 
-/// 对比两次 /status 快照,产出人类可读的变化行(纯函数,便于单测)。
+/// 对比两次 /status 快照，产出人类可读的变化行 (纯函数，便于单测)。
 ///
-/// 变化类别与顺序:先按新快照顺序报 health/recovery 变化与新增 target,
-/// 再按旧快照顺序报删除 target。输出不含时间戳(调用方统一加 `Δ HH:MM:SS`)。
+/// 变化类别与顺序：先按新快照顺序报 health/recovery 变化与新增 target,
+/// 再按旧快照顺序报删除 target。输出不含时间戳 (调用方统一加 `Δ HH:MM:SS`)。
 fn status_diff(old: &StatusReport, new: &StatusReport) -> Vec<String> {
     let old_map: std::collections::HashMap<&str, &TargetStatus> =
         old.targets.iter().map(|t| (t.name.as_str(), t)).collect();
@@ -516,7 +518,7 @@ fn status_diff(old: &StatusReport, new: &StatusReport) -> Vec<String> {
     out
 }
 
-/// watch 单帧渲染:顶部时间戳/轮询计数 + status 表格 + 变化历史 + `last poll` 底栏。
+/// watch 单帧渲染：顶部时间戳/轮询计数 + status 表格 + 变化历史 + `last poll` 底栏。
 fn render_watch_frame(
     report: &StatusReport,
     poll: u64,
@@ -539,7 +541,7 @@ fn render_watch_frame(
     out
 }
 
-/// 当前墙钟 unix 秒(失败按 0;仅用于展示)。
+/// 当前墙钟 unix 秒 (失败按 0;仅用于展示)。
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -547,7 +549,7 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// unix 秒 → UTC 当日 `HH:MM:SS`(不引入额外依赖,跨午夜按当日时间循环)。
+/// unix 秒 → UTC 当日 `HH:MM:SS`(不引入额外依赖，跨午夜按当日时间循环)。
 fn fmt_hms(unix_secs: u64) -> String {
     let tod = unix_secs % 86_400;
     format!(
@@ -558,12 +560,12 @@ fn fmt_hms(unix_secs: u64) -> String {
     )
 }
 
-/// 枚举 Debug 形态小写化(supervise / running / critical ...)。
+/// 枚举 Debug 形态小写化 (supervise / running / critical ...)。
 fn label<T: std::fmt::Debug>(v: T) -> String {
     format!("{v:?}").to_lowercase()
 }
 
-/// 超宽单元格截断(表格对齐用)。
+/// 超宽单元格截断 (表格对齐用)。
 fn clip(s: &str, width: usize) -> String {
     if s.chars().count() <= width {
         s.to_string()
@@ -574,7 +576,7 @@ fn clip(s: &str, width: usize) -> String {
     }
 }
 
-/// 墙钟时间以 unix 秒展示(不引入额外依赖)。
+/// 墙钟时间以 unix 秒展示 (不引入额外依赖)。
 fn fmt_time(t: std::time::SystemTime) -> String {
     t.duration_since(std::time::UNIX_EPOCH)
         .map(|d| format!("{}s", d.as_secs()))
@@ -585,7 +587,7 @@ fn build_client() -> std::result::Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder().timeout(HTTP_TIMEOUT).build()
 }
 
-/// monitorctl 默认静默:仅当设置 RUST_LOG 才初始化日志(输出到 stderr,不污染管道)。
+/// monitorctl 默认静默：仅当设置 RUST_LOG 才初始化日志 (输出到 stderr，不污染管道)。
 fn init_logging() {
     if std::env::var_os("RUST_LOG").is_some() {
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -603,7 +605,7 @@ mod tests {
     use monitor_core::model::control::{HealthLevel, RecoveryState, TargetMode};
     use std::time::UNIX_EPOCH;
 
-    /// 测试用 TargetStatus 构造(identity/incident/last_transition 置空)。
+    /// 测试用 TargetStatus 构造 (identity/incident/last_transition 置空)。
     fn tgt(
         name: &str,
         mode: TargetMode,

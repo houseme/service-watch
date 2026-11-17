@@ -1,13 +1,13 @@
-//! 恢复状态机(DESIGN.md §8 全转移表)。纯逻辑:时间由调用方注入单调 `Instant`,
-//! 动作以 [`RecoverAction`] 返回,由 eval 调度器执行(本模块不做任何 I/O)。
+//! 恢复状态机 (DESIGN.md §8 全转移表)。纯逻辑：时间由调用方注入单调 `Instant`,
+//! 动作以 [`RecoverAction`] 返回，由 eval 调度器执行 (本模块不做任何 I/O)。
 //!
-//! 约定(§8.2):
+//! 约定 (§8.2):
 //! - 本模块返回 [`RecoverAction::ScheduleSpawn`] 时内部同步记录 `spawn_due`;
 //!   调度器每轮调用 [`RecoveryFsm::on_tick`],spawn_due 到点时返回
 //!   `ScheduleSpawn { delay: 0 }` 表示"现在该 spawn 了",真正执行由调度器做。
 //! - 调度器必须在 spawn 尝试后回填 [`RecoveryFsm::on_spawn_result`](无论成败),
 //!   否则状态机会停在 Restarting。
-//! - 强杀(`ForceKill`)发出后,调度器应稍作轮询再回报 `on_stop_result(false)`;
+//! - 强杀 (`ForceKill`) 发出后，调度器应稍作轮询再回报 `on_stop_result(false)`;
 //!   FSM 收到 ForceKill 下的 `false` 即按 §8.2 判 Fatal(Unix D 状态兜底)。
 
 pub mod journal;
@@ -27,24 +27,24 @@ pub use policy::{Backoff, BudgetWindow, RestartPolicy};
 /// 恢复状态机要求调度器执行的动作。
 #[derive(Debug, Clone)]
 pub enum RecoverAction {
-    /// 按 backoff 延迟后 spawn(调度器记录 spawn 截止时间,on_tick 到点再真正执行)。
+    /// 按 backoff 延迟后 spawn(调度器记录 spawn 截止时间，on_tick 到点再真正执行)。
     ScheduleSpawn { delay: Duration },
-    /// graceful 停止(SIGTERM / CTRL_BREAK 尝试)。
+    /// graceful 停止 (SIGTERM / CTRL_BREAK 尝试)。
     SignalStop,
-    /// 强杀(SIGKILL / TerminateJobObject)。
+    /// 强杀 (SIGKILL / TerminateJobObject)。
     ForceKill,
-    /// 执行激活钩子( HungAction::Activate )。
+    /// 执行激活钩子 ( HungAction::Activate )。
     RunActivate,
     /// 进入 Fatal(调度器发 journal + Critical 告警)。
     MarkFatal,
-    /// 每次预算计数对应一条 journal 记录。仅由 FSM 计数点产生,
+    /// 每次预算计数对应一条 journal 记录。仅由 FSM 计数点产生，
     /// child 退出和手动停止本身不额外产生预算记录。
     JournalRestart { fast_exit: bool },
     /// 需要写 journal 的审计记录。
     Audit { message: String, at: SystemTime },
 }
 
-/// 恢复状态机(supervise 目标独占一份)。
+/// 恢复状态机 (supervise 目标独占一份)。
 #[derive(Debug)]
 pub struct RecoveryFsm {
     name: String,
@@ -54,31 +54,31 @@ pub struct RecoveryFsm {
     backoff: Backoff,
     /// 进入当前状态的单调时刻。
     entered_at: Instant,
-    /// 健康类失败的连续确认计数(Suspect 判定)。
+    /// 健康类失败的连续确认计数 (Suspect 判定)。
     suspect_confirmations: u32,
     /// liveness 消失的连续确认计数。
     gone_confirmations: u32,
     /// Fatal 闩锁。
     fatal: bool,
-    /// spawn 截止时间(ScheduleSpawn 后由调度器在到点时调用 `on_spawn_due`)。
+    /// spawn 截止时间 (ScheduleSpawn 后由调度器在到点时调用 `on_spawn_due`)。
     spawn_due: Option<Instant>,
-    /// force-kill 升级截断时间(SignalStop 后 stop_grace 内未停止则升级)。
+    /// force-kill 升级截断时间 (SignalStop 后 stop_grace 内未停止则升级)。
     stop_deadline: Option<Instant>,
-    /// 最近一次 spawn 的身份与时刻(用于 min_uptime / startup_grace 判定)。
+    /// 最近一次 spawn 的身份与时刻 (用于 min_uptime / startup_grace 判定)。
     last_spawn: Option<(ProcessIdentity, Instant)>,
     /// activate 观察期截止。
     verify_deadline: Option<Instant>,
-    /// 窗口内重启总次数(供 /status;不受窗口滑动影响)。
+    /// 窗口内重启总次数 (供 /status;不受窗口滑动影响)。
     restarts_total: u64,
-    /// 状态转移总次数(供 /metrics 运行观测)。
+    /// 状态转移总次数 (供 /metrics 运行观测)。
     transitions_total: u64,
-    /// activate 成功后的观察期时长(对应 ActivateCfg.verify_for;调度器经
-    /// [`RecoveryFsm::set_verify_for`] 注入,缺省以 startup_grace 兜底)。
+    /// activate 成功后的观察期时长 (对应 ActivateCfg.verify_for;调度器经
+    /// [`RecoveryFsm::set_verify_for`] 注入，缺省以 startup_grace 兜底)。
     verify_for: Duration,
-    /// 最近一次健康反馈(verify 观察期到点时判定 activate 成败的依据)。
+    /// 最近一次健康反馈 (verify 观察期到点时判定 activate 成败的依据)。
     last_health: Option<HealthLevel>,
-    /// 构造时刻的单调/墙钟锚点:Audit 时间戳由注入的 `Instant` 派生,
-    /// 纯逻辑路径不再读墙钟(构造时的唯一一次除外)。
+    /// 构造时刻的单调/墙钟锚点:Audit 时间戳由注入的 `Instant` 派生，
+    /// 纯逻辑路径不再读墙钟 (构造时的唯一一次除外)。
     mono_anchor: Instant,
     wall_anchor: SystemTime,
 }
@@ -110,13 +110,13 @@ impl RecoveryFsm {
         }
     }
 
-    /// 注入 activate 观察期时长(ActivateCfg.verify_for;new 时以 startup_grace 兜底)。
+    /// 注入 activate 观察期时长 (ActivateCfg.verify_for;new 时以 startup_grace 兜底)。
     pub fn set_verify_for(&mut self, verify_for: Duration) {
         self.verify_for = verify_for;
     }
 
-    /// 热更新恢复策略,保留状态、预算素材、退避次数及已建立的操作截止时间。
-    /// 新参数用于后续事件,在途停止/激活仍按已经建立的截止时间收尾。
+    /// 热更新恢复策略，保留状态、预算素材、退避次数及已建立的操作截止时间。
+    /// 新参数用于后续事件，在途停止/激活仍按已经建立的截止时间收尾。
     pub fn update_policy(&mut self, policy: RestartPolicy) {
         self.budget
             .update_limits(policy.max_restarts, policy.restart_window);
@@ -125,7 +125,7 @@ impl RecoveryFsm {
         self.policy = policy;
     }
 
-    /// 与 ProcessManager 同步亲生子进程的观测身份,保留原 spawn 时间。
+    /// 与 ProcessManager 同步亲生子进程的观测身份，保留原 spawn 时间。
     pub fn adopt_identity(&mut self, previous: ProcessIdentity, observed: ProcessIdentity) {
         if previous.pid != observed.pid {
             return;
@@ -157,14 +157,14 @@ impl RecoveryFsm {
         self.restarts_total
     }
 
-    /// 状态转移总次数(运行观测;含进入 Fatal)。
+    /// 状态转移总次数 (运行观测;含进入 Fatal)。
     pub fn transitions_total(&self) -> u64 {
         self.transitions_total
     }
 
-    // ---- 事件入口(实现代理 C:按 §8.2 全转移表实现) ----
+    // ---- 事件入口 (实现代理 C:按 §8.2 全转移表实现) ----
 
-    /// 亲生进程退出(确定性死亡路径)。
+    /// 亲生进程退出 (确定性死亡路径)。
     pub fn on_child_exit(&mut self, now: Instant, identity: ProcessIdentity) -> Vec<RecoverAction> {
         if self.fatal {
             return vec![];
@@ -190,33 +190,33 @@ impl RecoveryFsm {
                 self.last_spawn = None;
                 self.deterministic_death(now, Some(uptime))
             }
-            // 恢复执行中收到孩子退出:
+            // 恢复执行中收到孩子退出：
             RecoveryState::Recovering if self.stop_deadline.is_some() => {
                 // stop 待确认:reaper 先于轮询发现退出 → 视同 stop 完成。
                 self.stop_confirmed(now)
             }
             RecoveryState::Recovering if self.verify_deadline.is_some() => {
-                // activate 观察期内进程死亡:恢复失败 → 计入 budget,直接排重启。
+                // activate 观察期内进程死亡：恢复失败 → 计入 budget，直接排重启。
                 self.verify_deadline = None;
                 self.last_spawn = None;
                 self.fail_recover_and_respawn(now, "activate 观察期内进程退出")
             }
             RecoveryState::ForceKill => {
-                // SIGKILL 已送达且进程死亡:等同 stop 完成(评审 P0 修复 —— 此前
-                // 落入空臂被当陈旧事件,FSM 永久卡死在 ForceKill,服务不再拉起)。
+                // SIGKILL 已送达且进程死亡：等同 stop 完成 (评审 P0 修复 —— 此前
+                // 落入空臂被当陈旧事件，FSM 永久卡死在 ForceKill，服务不再拉起)。
                 self.last_spawn = None;
                 self.stop_confirmed(now)
             }
-            // 其余恢复态无活孩子;死亡路径排程中(waiting backoff)的重复退出是陈旧事件。
+            // 其余恢复态无活孩子;死亡路径排程中 (waiting backoff) 的重复退出是陈旧事件。
             _ => vec![],
         }
     }
 
-    /// 计划内级联停止确认(F20;第六轮评审 P3 修复):dependent 因依赖 restart
+    /// 计划内级联停止确认 (F20;第六轮评审 P3 修复):dependent 因依赖 restart
     /// 被**级联停止**,其退出不是故障 —— 与 `on_child_exit` 的 deterministic_death
-    /// 不同:**不计预算、不排程 spawn**(由 F20 依赖门控在依赖回 Running 后拉回,
+    /// 不同:**不计预算、不排程 spawn**(由 F20 依赖门控在依赖回 Running 后拉回，
     /// 见调度器 tick 的 "dependencies running; scheduling cold start" 分支)。
-    /// 受理:非 Fatal 且处于任何未闩锁状态(signal_stop 后 FSM 状态未变,退出
+    /// 受理：非 Fatal 且处于任何未闩锁状态 (signal_stop 后 FSM 状态未变，退出
     /// 事件到达时按此收口;重复调用是幂等收口)。
     pub fn on_planned_stop(&mut self, now: Instant) -> Vec<RecoverAction> {
         if self.fatal {
@@ -228,11 +228,11 @@ impl RecoveryFsm {
         self.enter(RecoveryState::Restarting, now);
         vec![self.audit(
             now,
-            "计划内级联停止确认(依赖重启中):不计预算,由 F20 依赖门控拉回".into(),
+            "计划内级联停止确认 (依赖重启中):不计预算，由 F20 依赖门控拉回".into(),
         )]
     }
 
-    /// attach/liveness 报告目标消失一次(内部累计到 confirmations 才触发)。
+    /// attach/liveness 报告目标消失一次 (内部累计到 confirmations 才触发)。
     pub fn on_liveness_gone(&mut self, now: Instant) -> Vec<RecoverAction> {
         if self.fatal {
             return vec![];
@@ -241,7 +241,7 @@ impl RecoveryFsm {
             RecoveryState::Running | RecoveryState::Suspect | RecoveryState::Starting => {
                 self.gone_confirmations += 1;
                 if self.gone_confirmations < self.policy.confirmations {
-                    return vec![]; // 未到阈值,无动作
+                    return vec![]; // 未到阈值，无动作
                 }
                 self.gone_confirmations = 0;
                 let uptime = self
@@ -249,19 +249,19 @@ impl RecoveryFsm {
                     .map(|(_, at)| now.duration_since(at))
                     .unwrap_or(Duration::ZERO);
                 self.last_spawn = None;
-                // 连续 confirmations 次查无 (pid,start_time) → 确定性死亡(§8.1)
+                // 连续 confirmations 次查无 (pid,start_time) → 确定性死亡 (§8.1)
                 if self.state == RecoveryState::Starting && uptime < self.policy.min_uptime {
                     self.crashloop_on_death(now, uptime)
                 } else {
                     self.deterministic_death(now, Some(uptime))
                 }
             }
-            // 恢复执行中不再受理(verify 超时/stop grace 是既定兜底路径)
+            // 恢复执行中不再受理 (verify 超时/stop grace 是既定兜底路径)
             _ => vec![],
         }
     }
 
-    /// liveness 存活(清空消失计数;Suspect 下连续成功确认自愈回 Running)。
+    /// liveness 存活 (清空消失计数;Suspect 下连续成功确认自愈回 Running)。
     pub fn on_liveness_ok(&mut self, now: Instant) -> Vec<RecoverAction> {
         self.gone_confirmations = 0;
         if self.fatal {
@@ -269,22 +269,22 @@ impl RecoveryFsm {
         }
         match self.state {
             RecoveryState::Suspect => {
-                // 连续成功由调用方保证(§8.1)→ 自愈回 Running
+                // 连续成功由调用方保证 (§8.1)→ 自愈回 Running
                 self.clear_recovery();
                 self.backoff.reset();
                 self.enter(RecoveryState::Running, now);
-                vec![self.audit(now, "健康恢复确认,Suspect 自愈回 Running".into())]
+                vec![self.audit(now, "健康恢复确认，Suspect 自愈回 Running".into())]
             }
             RecoveryState::Starting => {
                 if now.duration_since(self.entered_at) >= self.policy.min_uptime {
-                    // 存活 > min_uptime 且健康首次成功 → Running;backoff 重置(§8.2)
+                    // 存活 > min_uptime 且健康首次成功 → Running;backoff 重置 (§8.2)
                     self.clear_recovery();
                     self.backoff.reset();
                     self.enter(RecoveryState::Running, now);
                     vec![self.audit(
                         now,
                         format!(
-                            "启动完成(存活 ≥ min_uptime {:?}),进入 Running",
+                            "启动完成 (存活 ≥ min_uptime {:?}),进入 Running",
                             self.policy.min_uptime
                         ),
                     )]
@@ -292,7 +292,7 @@ impl RecoveryFsm {
                     vec![]
                 }
             }
-            // activate 观察期内健康恢复 → 验证成功,回 Running(§8.5)
+            // activate 观察期内健康恢复 → 验证成功，回 Running(§8.5)
             RecoveryState::Recovering if self.verify_deadline.is_some() => {
                 self.finish_verify_success(now)
             }
@@ -300,14 +300,14 @@ impl RecoveryFsm {
         }
     }
 
-    /// 检查状态机级别变化(健康类失败触发 Suspect/二次确认;§8.1 触发契约)。
+    /// 检查状态机级别变化 (健康类失败触发 Suspect/二次确认;§8.1 触发契约)。
     pub fn on_health(&mut self, now: Instant, level: HealthLevel) -> Vec<RecoverAction> {
         self.last_health = Some(level);
         if self.fatal {
             return vec![];
         }
         match level {
-            // 健康:等同 liveness 存活(自愈 / Starting→Running / verify 成功)
+            // 健康：等同 liveness 存活 (自愈 / Starting→Running / verify 成功)
             HealthLevel::Ok => self.on_liveness_ok(now),
             HealthLevel::Warning => {
                 // 无恢复动作;Suspect 下 Warning 打断"连续 Critical"链
@@ -333,7 +333,7 @@ impl RecoveryFsm {
                         self.stop_deadline = None;
                         self.enter(RecoveryState::ForceKill, now);
                         return vec![
-                            self.audit(now, "stop_grace 超时未退出,升级强杀".into()),
+                            self.audit(now, "stop_grace 超时未退出，升级强杀".into()),
                             RecoverAction::ForceKill,
                         ];
                     }
@@ -349,16 +349,16 @@ impl RecoveryFsm {
                 self.fire_spawn_due(now)
             }
             RecoveryState::Restarting | RecoveryState::CrashLoop => self.fire_spawn_due(now),
-            // Running/Suspect/Starting/ForceKill 无定时职责:
-            // - Starting 的 startup_grace 门在 on_health 里判(超时后走正常路径);
+            // Running/Suspect/Starting/ForceKill 无定时职责：
+            // - Starting 的 startup_grace 门在 on_health 里判 (超时后走正常路径);
             // - ForceKill 只等 stop 回报。
             _ => vec![],
         }
     }
 
-    /// 调度器报告 spawn 结果(Ok=新进程身份;Err=spawn 失败 → CrashLoop 计入 budget)。
+    /// 调度器报告 spawn 结果 (Ok=新进程身份;Err=spawn 失败 → CrashLoop 计入 budget)。
     ///
-    /// 受理范围:除 Starting(spawn 已在途,重复结果视为陈旧事件)与 Fatal 外的
+    /// 受理范围：除 Starting(spawn 已在途，重复结果视为陈旧事件) 与 Fatal 外的
     /// 全部状态——**初始 spawn 在 Running 到达**;控制面重启可在 Suspect 到达;
     /// 恢复态按对应转移推进。
     pub fn on_spawn_result(
@@ -370,7 +370,7 @@ impl RecoveryFsm {
             return vec![];
         }
         self.spawn_due = None;
-        // 每次真实 spawn 尝试计入总重启数(供 /status;预算计数见下)
+        // 每次真实 spawn 尝试计入总重启数 (供 /status;预算计数见下)
         self.restarts_total = self.restarts_total.saturating_add(1);
         match identity {
             Some(id) => {
@@ -380,21 +380,21 @@ impl RecoveryFsm {
                 vec![self.audit(
                     now,
                     format!(
-                        "spawn 成功({id}),进入 Starting(startup_grace={:?})",
+                        "spawn 成功 ({id}),进入 Starting(startup_grace={:?})",
                         self.policy.startup_grace
                     ),
                 )]
             }
             None => {
                 self.last_spawn = None;
-                // 所有自动重启均计数,含 spawn 失败重试(§8.2 预算语义)
+                // 所有自动重启均计数，含 spawn 失败重试 (§8.2 预算语义)
                 self.budget.record(now);
                 let mut actions = vec![
-                    self.audit(now, "spawn 失败,计入重启预算".into()),
+                    self.audit(now, "spawn 失败，计入重启预算".into()),
                     RecoverAction::JournalRestart { fast_exit: false },
                 ];
                 if self.budget.would_exceed(now) {
-                    return self.enter_fatal(now, actions, "重启预算耗尽(spawn 失败重试)");
+                    return self.enter_fatal(now, actions, "重启预算耗尽 (spawn 失败重试)");
                 }
                 self.enter(RecoveryState::CrashLoop, now);
                 let delay = self.backoff.next_delay();
@@ -405,7 +405,7 @@ impl RecoveryFsm {
         }
     }
 
-    /// SCM 目标 spawn 成功的专用入口(`windows_service` 目标没有 (pid, start_time)
+    /// SCM 目标 spawn 成功的专用入口 (`windows_service` 目标没有 (pid, start_time)
     /// 进程身份可登记;ROADMAP「原生 Windows Service 目标恢复」)。
     ///
     /// 与 [`Self::on_spawn_result`] 的 Some 分支同语义:→ Starting、清恢复在途
@@ -418,17 +418,17 @@ impl RecoveryFsm {
             return vec![];
         }
         self.spawn_due = None;
-        // 与 on_spawn_result(Some) 对齐:每次真实启动尝试计入总重启数
+        // 与 on_spawn_result(Some) 对齐：每次真实启动尝试计入总重启数
         self.restarts_total = self.restarts_total.saturating_add(1);
         self.clear_recovery();
         self.enter(RecoveryState::Starting, now);
         vec![self.audit(
             now,
-            "SCM 服务启动成功,进入 Starting(无进程身份;QueryStatus 即 liveness 证据)".into(),
+            "SCM 服务启动成功，进入 Starting(无进程身份;QueryStatus 即 liveness 证据)".into(),
         )]
     }
 
-    /// 调度器报告 stop 结果(gone=true 表示已确认退出)。
+    /// 调度器报告 stop 结果 (gone=true 表示已确认退出)。
     pub fn on_stop_result(&mut self, now: Instant, gone: bool) -> Vec<RecoverAction> {
         if self.fatal {
             return vec![];
@@ -438,35 +438,35 @@ impl RecoveryFsm {
                 if gone {
                     self.stop_confirmed(now)
                 } else {
-                    // §8.2:ForceKill 失败(Unix D 状态等)→ Fatal 闩锁
-                    self.enter_fatal(now, vec![], "强杀失败(进程未退出,可能处于不可中断 IO)")
+                    // §8.2:ForceKill 失败 (Unix D 状态等)→ Fatal 闩锁
+                    self.enter_fatal(now, vec![], "强杀失败 (进程未退出，可能处于不可中断 IO)")
                 }
             }
             RecoveryState::Recovering if self.stop_deadline.is_some() => {
                 if gone {
                     self.stop_confirmed(now)
                 } else if self.stop_deadline.is_some_and(|dl| now >= dl) {
-                    // stop_grace 已超时仍未退出 → 升级强杀(on_tick 亦会兜底)
+                    // stop_grace 已超时仍未退出 → 升级强杀 (on_tick 亦会兜底)
                     self.stop_deadline = None;
                     self.enter(RecoveryState::ForceKill, now);
                     vec![
-                        self.audit(now, "stop_grace 超时仍未退出,升级强杀".into()),
+                        self.audit(now, "stop_grace 超时仍未退出，升级强杀".into()),
                         RecoverAction::ForceKill,
                     ]
                 } else {
-                    vec![] // grace 未到,继续等待
+                    vec![] // grace 未到，继续等待
                 }
             }
             _ => vec![],
         }
     }
 
-    /// 激活钩子结果(Ok=已执行,进入 verify_for 观察)。
+    /// 激活钩子结果 (Ok=已执行，进入 verify_for 观察)。
     pub fn on_activate_result(&mut self, now: Instant, ok: bool) -> Vec<RecoverAction> {
         if self.fatal {
             return vec![];
         }
-        // 仅在 Recovering(hung_action=Activate)且无任何在途动作时受理
+        // 仅在 Recovering(hung_action=Activate) 且无任何在途动作时受理
         if self.state != RecoveryState::Recovering
             || self.verify_deadline.is_some()
             || self.stop_deadline.is_some()
@@ -475,25 +475,25 @@ impl RecoveryFsm {
             return vec![];
         }
         if ok {
-            // 钩子成功 → verify_for 观察期:期内健康恢复 → Running;到点仍无 → 停止重启(§8.5)
+            // 钩子成功 → verify_for 观察期：期内健康恢复 → Running;到点仍无 → 停止重启 (§8.5)
             self.verify_deadline = Some(now + self.verify_for);
             self.last_health = None; // 从此刻起重新观察健康
             vec![self.audit(
                 now,
                 format!(
-                    "activate 钩子执行成功,进入 verify_for={:?} 观察期",
+                    "activate 钩子执行成功，进入 verify_for={:?} 观察期",
                     self.verify_for
                 ),
             )]
         } else {
-            // 钩子失败/超时 → 停止并重启,计入 budget(§8.2)
+            // 钩子失败/超时 → 停止并重启，计入 budget(§8.2)
             self.budget.record(now);
             let mut actions = vec![
-                self.audit(now, "activate 钩子失败,停止并重启(计入重启预算)".into()),
+                self.audit(now, "activate 钩子失败，停止并重启 (计入重启预算)".into()),
                 RecoverAction::JournalRestart { fast_exit: false },
             ];
             if self.budget.would_exceed(now) {
-                return self.enter_fatal(now, actions, "重启预算耗尽(activate 钩子失败)");
+                return self.enter_fatal(now, actions, "重启预算耗尽 (activate 钩子失败)");
             }
             self.stop_deadline = Some(now + self.policy.stop_grace);
             actions.push(RecoverAction::SignalStop);
@@ -511,12 +511,12 @@ impl RecoveryFsm {
         self.enter(RecoveryState::Running, now);
         vec![self.audit(
             now,
-            "控制面 reset:解除 Fatal 闩锁、清空重启预算,回到 Running".into(),
+            "控制面 reset:解除 Fatal 闩锁、清空重启预算，回到 Running".into(),
         )]
     }
 
-    /// 控制平面 reset 后同步当前仍存活的亲生 child,保持原启动时刻。
-    /// child 身份由独占 ProcessManager 提供,reset 本身不计为一次 spawn。
+    /// 控制平面 reset 后同步当前仍存活的亲生 child，保持原启动时刻。
+    /// child 身份由独占 ProcessManager 提供，reset 本身不计为一次 spawn。
     pub fn reset_with_child(
         &mut self,
         now: Instant,
@@ -527,8 +527,8 @@ impl RecoveryFsm {
         actions
     }
 
-    /// 已确认接管身份消失,按一次确定性死亡受预算与退避约束。
-    /// 孤儿原始启动的单调时刻未知,不作 fast-exit 判定。
+    /// 已确认接管身份消失，按一次确定性死亡受预算与退避约束。
+    /// 孤儿原始启动的单调时刻未知，不作 fast-exit 判定。
     pub fn on_reconciled_exit(&mut self, now: Instant) -> Vec<RecoverAction> {
         if self.fatal {
             return vec![];
@@ -537,7 +537,7 @@ impl RecoveryFsm {
         self.deterministic_death(now, None)
     }
 
-    /// 从 journal 恢复(Fatal 闩锁 + budget 时间戳)。
+    /// 从 journal 恢复 (Fatal 闩锁 + budget 时间戳)。
     pub fn restore(
         &mut self,
         fatal: bool,
@@ -559,9 +559,9 @@ impl RecoveryFsm {
 
     /// 确定性死亡 → Recovering + 按 backoff 排程 spawn(不经 Suspect,§8.1)。
     ///
-    /// budget 语义(DESIGN §8.2 尾注):**所有自动重启均计数**——慢死亡也记录,
+    /// budget 语义 (DESIGN §8.2 尾注):**所有自动重启均计数**——慢死亡也记录，
     /// 防止"每 11 分钟死一次"的服务以 backoff_max 节奏无限重启而不触发 Fatal;
-    /// fast-exit 的 Starting 路径由 [`Self::crashloop_on_death`] 计数,不经过这里。
+    /// fast-exit 的 Starting 路径由 [`Self::crashloop_on_death`] 计数，不经过这里。
     fn deterministic_death(
         &mut self,
         now: Instant,
@@ -574,7 +574,7 @@ impl RecoveryFsm {
             self.audit(
                 now,
                 format!(
-                    "孩子进程退出(确定性死亡,uptime={:?}{})进入恢复",
+                    "孩子进程退出 (确定性死亡，uptime={:?}{}) 进入恢复",
                     uptime,
                     if fast { ",fast_exit" } else { "" }
                 ),
@@ -582,7 +582,7 @@ impl RecoveryFsm {
             RecoverAction::JournalRestart { fast_exit: fast },
         ];
         if self.budget.would_exceed(now) {
-            return self.enter_fatal(now, actions, "重启预算耗尽(确定性死亡)");
+            return self.enter_fatal(now, actions, "重启预算耗尽 (确定性死亡)");
         }
         self.enter(RecoveryState::Recovering, now);
         let delay = self.backoff.next_delay();
@@ -591,21 +591,21 @@ impl RecoveryFsm {
         actions
     }
 
-    /// Starting 内 fast-exit → CrashLoop:计入 budget,可能 Fatal(§8.2)。
+    /// Starting 内 fast-exit → CrashLoop:计入 budget，可能 Fatal(§8.2)。
     fn crashloop_on_death(&mut self, now: Instant, uptime: Duration) -> Vec<RecoverAction> {
         self.budget.record(now);
         let mut actions = vec![
             self.audit(
                 now,
                 format!(
-                    "进程退出过快(uptime={:?} < min_uptime={:?}),计入重启预算",
+                    "进程退出过快 (uptime={:?} < min_uptime={:?}),计入重启预算",
                     uptime, self.policy.min_uptime
                 ),
             ),
             RecoverAction::JournalRestart { fast_exit: true },
         ];
         if self.budget.would_exceed(now) {
-            return self.enter_fatal(now, actions, "重启预算耗尽(快速退出循环)");
+            return self.enter_fatal(now, actions, "重启预算耗尽 (快速退出循环)");
         }
         self.enter(RecoveryState::CrashLoop, now);
         let delay = self.backoff.next_delay();
@@ -614,19 +614,19 @@ impl RecoveryFsm {
         actions
     }
 
-    /// 健康类失败达到 confirmations → 进入 Recovering,按 hung_action 执行(§8.1/§8.5)。
+    /// 健康类失败达到 confirmations → 进入 Recovering，按 hung_action 执行 (§8.1/§8.5)。
     ///
-    /// budget:仅 **Restart** 分支计一次(SRE 评审 P1:健康类挂死的自动重启此前
-    /// 零计数,"反复死锁但响应 SIGTERM"的服务永不 Fatal)。Activate 分支不计 ——
+    /// budget:仅 **Restart** 分支计一次 (SRE 评审 P1:健康类挂死的自动重启此前
+    /// 零计数，"反复死锁但响应 SIGTERM"的服务永不 Fatal)。Activate 分支不计 ——
     /// 激活成功意味着**没有发生重启**;激活失败转为重启时在各自失败点
-    /// (钩子失败 / verify 超时 / 观察期死亡)计数,恰好一次。
+    /// (钩子失败 / verify 超时 / 观察期死亡) 计数，恰好一次。
     fn begin_recovery(&mut self, now: Instant) -> Vec<RecoverAction> {
         self.clear_recovery();
         self.enter(RecoveryState::Recovering, now);
         let mut actions = vec![self.audit(
             now,
             format!(
-                "健康失败确认 ×{},进入恢复(hung_action={:?})",
+                "健康失败确认 ×{},进入恢复 (hung_action={:?})",
                 self.policy.confirmations, self.policy.hung_action
             ),
         )];
@@ -635,7 +635,7 @@ impl RecoveryFsm {
                 self.budget.record(now);
                 actions.push(RecoverAction::JournalRestart { fast_exit: false });
                 if self.budget.would_exceed(now) {
-                    return self.enter_fatal(now, actions, "重启预算耗尽(健康类挂死)");
+                    return self.enter_fatal(now, actions, "重启预算耗尽 (健康类挂死)");
                 }
                 self.stop_deadline = Some(now + self.policy.stop_grace);
                 actions.push(RecoverAction::SignalStop);
@@ -648,8 +648,8 @@ impl RecoveryFsm {
     }
 
     /// Critical 的受理窗口:Running/Suspect 直接受理;Starting 仅在
-    /// startup_grace 过后受理(启动期失败不算挂死,§8.2 Starting 边);
-    /// 恢复执行期间(Recovering/ForceKill/Restarting/CrashLoop)忽略,
+    /// startup_grace 过后受理 (启动期失败不算挂死，§8.2 Starting 边);
+    /// 恢复执行期间 (Recovering/ForceKill/Restarting/CrashLoop) 忽略，
     /// 防"刚重启被判挂死"(§8.1)。
     fn on_health_critical(&mut self, now: Instant) -> Vec<RecoverAction> {
         let eligible = match self.state {
@@ -670,16 +670,16 @@ impl RecoveryFsm {
             vec![self.audit(
                 now,
                 format!(
-                    "健康 Critical,Suspect 待二次确认({}/{})",
+                    "健康 Critical,Suspect 待二次确认 ({}/{})",
                     self.suspect_confirmations, self.policy.confirmations
                 ),
             )]
         } else {
-            vec![] // 已在 Suspect,计数推进但未达阈值
+            vec![] // 已在 Suspect，计数推进但未达阈值
         }
     }
 
-    /// stop(或强杀)确认完成 → Restarting + 按 backoff 排程 spawn(§8.2)。
+    /// stop(或强杀) 确认完成 → Restarting + 按 backoff 排程 spawn(§8.2)。
     fn stop_confirmed(&mut self, now: Instant) -> Vec<RecoverAction> {
         self.stop_deadline = None;
         self.verify_deadline = None;
@@ -688,20 +688,20 @@ impl RecoveryFsm {
         let delay = self.backoff.next_delay();
         self.spawn_due = Some(now + delay);
         vec![
-            self.audit(now, "停止完成,backoff 后重启".into()),
+            self.audit(now, "停止完成，backoff 后重启".into()),
             RecoverAction::ScheduleSpawn { delay },
         ]
     }
 
-    /// 恢复失败(verify 失败/钩子失败/观察期死亡)→ 计入 budget 并排重启。
+    /// 恢复失败 (verify 失败/钩子失败/观察期死亡)→ 计入 budget 并排重启。
     fn fail_recover_and_respawn(&mut self, now: Instant, reason: &str) -> Vec<RecoverAction> {
         self.budget.record(now);
         let mut actions = vec![
-            self.audit(now, format!("{reason},恢复失败计入重启预算,直接排程重启")),
+            self.audit(now, format!("{reason},恢复失败计入重启预算，直接排程重启")),
             RecoverAction::JournalRestart { fast_exit: false },
         ];
         if self.budget.would_exceed(now) {
-            return self.enter_fatal(now, actions, "重启预算耗尽(恢复失败)");
+            return self.enter_fatal(now, actions, "重启预算耗尽 (恢复失败)");
         }
         self.enter(RecoveryState::Restarting, now);
         let delay = self.backoff.next_delay();
@@ -710,7 +710,7 @@ impl RecoveryFsm {
         actions
     }
 
-    /// verify 观察期到点:最近健康反馈为 Ok → 成功回 Running;否则停止并重启(§8.2)。
+    /// verify 观察期到点：最近健康反馈为 Ok → 成功回 Running;否则停止并重启 (§8.2)。
     fn evaluate_verify(&mut self, now: Instant) -> Vec<RecoverAction> {
         if self.last_health == Some(HealthLevel::Ok) {
             self.finish_verify_success(now)
@@ -721,14 +721,14 @@ impl RecoveryFsm {
                 self.audit(
                     now,
                     format!(
-                        "activate 观察期到点健康未恢复(last_health={:?}),停止并重启(计入重启预算)",
+                        "activate 观察期到点健康未恢复 (last_health={:?}),停止并重启 (计入重启预算)",
                         self.last_health
                     ),
                 ),
                 RecoverAction::JournalRestart { fast_exit: false },
             ];
             if self.budget.would_exceed(now) {
-                return self.enter_fatal(now, actions, "重启预算耗尽(activate 验证失败)");
+                return self.enter_fatal(now, actions, "重启预算耗尽 (activate 验证失败)");
             }
             self.stop_deadline = Some(now + self.policy.stop_grace);
             actions.push(RecoverAction::SignalStop);
@@ -736,15 +736,15 @@ impl RecoveryFsm {
         }
     }
 
-    /// verify 成功 → Running(进程长期存活,backoff 一并重置,§8.2 尾注)。
+    /// verify 成功 → Running(进程长期存活，backoff 一并重置，§8.2 尾注)。
     fn finish_verify_success(&mut self, now: Instant) -> Vec<RecoverAction> {
         self.clear_recovery();
         self.backoff.reset();
         self.enter(RecoveryState::Running, now);
-        vec![self.audit(now, "activate 验证通过(观察期内健康恢复),回 Running".into())]
+        vec![self.audit(now, "activate 验证通过 (观察期内健康恢复),回 Running".into())]
     }
 
-    /// 进入 Fatal 闩锁(窗口滑过不自动恢复,仅 reset 解除,§8.2)。
+    /// 进入 Fatal 闩锁 (窗口滑过不自动恢复，仅 reset 解除，§8.2)。
     fn enter_fatal(
         &mut self,
         now: Instant,
@@ -760,7 +760,7 @@ impl RecoveryFsm {
         actions
     }
 
-    /// spawn_due 到点 → 回 `ScheduleSpawn{delay:0}`,由调度器真正执行(约定见模块 doc)。
+    /// spawn_due 到点 → 回 `ScheduleSpawn{delay:0}`,由调度器真正执行 (约定见模块 doc)。
     fn fire_spawn_due(&mut self, now: Instant) -> Vec<RecoverAction> {
         if !self.spawn_due.is_some_and(|due| now >= due) {
             return vec![];
@@ -769,7 +769,7 @@ impl RecoveryFsm {
         let mut actions = vec![];
         if self.state != RecoveryState::Restarting {
             self.enter(RecoveryState::Restarting, now);
-            actions.push(self.audit(now, "backoff 到点,发起 spawn".into()));
+            actions.push(self.audit(now, "backoff 到点，发起 spawn".into()));
         }
         actions.push(RecoverAction::ScheduleSpawn {
             delay: Duration::ZERO,
@@ -784,7 +784,7 @@ impl RecoveryFsm {
         self.transitions_total = self.transitions_total.saturating_add(1);
     }
 
-    /// 清理一轮恢复的在途状态(新恢复轮从干净状态开始)。
+    /// 清理一轮恢复的在途状态 (新恢复轮从干净状态开始)。
     fn clear_recovery(&mut self) {
         self.spawn_due = None;
         self.stop_deadline = None;
@@ -794,7 +794,7 @@ impl RecoveryFsm {
         self.last_health = None;
     }
 
-    /// 由注入的单调时刻派生墙钟(Audit.at 用;构造锚点换算,不读系统钟)。
+    /// 由注入的单调时刻派生墙钟 (Audit.at 用;构造锚点换算，不读系统钟)。
     fn wall_now(&self, now: Instant) -> SystemTime {
         self.wall_anchor
             .checked_add(now.duration_since(self.mono_anchor))
@@ -809,7 +809,7 @@ impl RecoveryFsm {
     }
 }
 
-/// 检查目标 → supervise 服务的关联表项(eval 维护;此处仅类型占位)。
+/// 检查目标 → supervise 服务的关联表项 (eval 维护;此处仅类型占位)。
 pub type WatchedPids = VecDeque<ProcessIdentity>;
 
 #[cfg(test)]
@@ -820,7 +820,7 @@ mod tests {
     const MIN_UPTIME: Duration = Duration::from_secs(10);
     const STARTUP_GRACE: Duration = Duration::from_secs(30);
 
-    /// t0 之后第 s 秒(全部注入 Instant,不读系统钟)。
+    /// t0 之后第 s 秒 (全部注入 Instant，不读系统钟)。
     fn t_at(t0: Instant, secs: u64) -> Instant {
         t0.checked_add(Duration::from_secs(secs))
             .expect("test time overflow")
@@ -854,7 +854,7 @@ mod tests {
         ProcessIdentity::new(pid, 1700000000)
     }
 
-    /// 标准开局:spawn 成功(Starting)→ 存活过 min_uptime 且健康 OK(Running)。
+    /// 标准开局:spawn 成功 (Starting)→ 存活过 min_uptime 且健康 OK(Running)。
     fn running(fsm: &mut RecoveryFsm, t0: Instant, pid: u32) {
         let _ = fsm.on_spawn_result(t_at(t0, 1), Some(ident(pid)));
         let _ = fsm.on_liveness_ok(t_at(t0, 1 + MIN_UPTIME.as_secs()));
@@ -873,7 +873,7 @@ mod tests {
             actions
                 .iter()
                 .any(|a| matches!(a, RecoverAction::Audit { .. })),
-            "状态转移必须产生 Audit 记录: {actions:?}"
+            "状态转移必须产生 Audit 记录：{actions:?}"
         );
     }
 
@@ -1112,7 +1112,7 @@ mod tests {
         assert_eq!(
             fsm.restarts_in_window(t_at(t0, 60)),
             1,
-            "慢死亡同样计入 budget(DESIGN §8.2:所有自动重启均计数,防'每 11 分钟死一次'永不过载)"
+            "慢死亡同样计入 budget(DESIGN §8.2:所有自动重启均计数，防'每 11 分钟死一次'永不过载)"
         );
         assert_audit(&actions);
     }
@@ -1133,20 +1133,20 @@ mod tests {
     }
 
     // ---- 修复回归:SRE P0 —— ForceKill 态收到 child_exit 必须收尾进 Restarting
-    // (此前落入空臂,FSM 永久卡死,SIGKILL 成功后服务不再拉起) ----
+    // (此前落入空臂，FSM 永久卡死，SIGKILL 成功后服务不再拉起) ----
     #[test]
     fn force_kill_success_child_exit_goes_restarting() {
         let t0 = Instant::now();
         let mut fsm = fsm_at(t0, 2, 5, HungAction::Restart);
         running(&mut fsm, t0, 100);
-        // 健康挂死:两次 Critical → begin_recovery(SignalStop) → grace 超时 → ForceKill
+        // 健康挂死：两次 Critical → begin_recovery(SignalStop) → grace 超时 → ForceKill
         let _ = fsm.on_health(t_at(t0, 100), HealthLevel::Critical);
         let _ = fsm.on_health(t_at(t0, 200), HealthLevel::Critical);
         assert_eq!(fsm.state(), RecoveryState::Recovering);
         // stop_deadline = t+200+15s;到点未确认 → ForceKill
         let _ = fsm.on_tick(t_at(t0, 200 + 16));
         assert_eq!(fsm.state(), RecoveryState::ForceKill);
-        // SIGKILL 成功,进程死亡(亲生退出事件)
+        // SIGKILL 成功，进程死亡 (亲生退出事件)
         let actions = fsm.on_child_exit(t_at(t0, 220), ident(100));
         assert_eq!(
             fsm.state(),
@@ -1171,11 +1171,11 @@ mod tests {
         assert_eq!(
             fsm.restarts_in_window(t_at(t0, 200)),
             1,
-            "健康类挂死的自动重启必须计入 budget(此前零计数,永不 Fatal)"
+            "健康类挂死的自动重启必须计入 budget(此前零计数，永不 Fatal)"
         );
     }
 
-    // ---- 语义:activate 成功 + verify 内恢复 = 未发生重启,不计 budget ----
+    // ---- 语义:activate 成功 + verify 内恢复 = 未发生重启，不计 budget ----
     #[test]
     fn activate_success_recovery_counts_no_budget() {
         let t0 = Instant::now();
@@ -1191,7 +1191,7 @@ mod tests {
         assert_eq!(
             fsm.restarts_in_window(t_at(t0, 210)),
             0,
-            "激活成功 = 未重启,不计 budget"
+            "激活成功 = 未重启，不计 budget"
         );
     }
 
@@ -1201,19 +1201,19 @@ mod tests {
         let t0 = Instant::now();
         let mut fsm = fsm_at(t0, 2, 3, HungAction::Restart); // max_restarts=3
         running(&mut fsm, t0, 100);
-        // 循环:慢死亡(>min_uptime)→ 排程 → spawn 成功 → 存活过 min_uptime → 再死亡。
-        // 节奏:死亡@T → spawn@T+2(backoff 1s)→ 存活 11s → 死亡@T+13;
-        // 三次死亡全部落在 60s 预算窗口内(滑动窗口语义)。
+        // 循环：慢死亡 (>min_uptime)→ 排程 → spawn 成功 → 存活过 min_uptime → 再死亡。
+        // 节奏：死亡@T → spawn@T+2(backoff 1s)→ 存活 11s → 死亡@T+13;
+        // 三次死亡全部落在 60s 预算窗口内 (滑动窗口语义)。
         let mut now_secs = 100u64;
         for round in 0..3u32 {
             let actions = fsm.on_child_exit(t_at(t0, now_secs), ident(100 + round));
             if round < 2 {
                 assert!(
                     find_schedule(&actions).is_some(),
-                    "预算未耗尽:慢死亡必须排程重启"
+                    "预算未耗尽：慢死亡必须排程重启"
                 );
             } else {
-                // 第 3 次死亡:窗口内 budget=3 → Fatal,不再排程(终态闩锁)
+                // 第 3 次死亡：窗口内 budget=3 → Fatal，不再排程 (终态闩锁)
                 assert!(find_schedule(&actions).is_none(), "预算耗尽不得再排程");
             }
             let fire = t_at(t0, now_secs + 2);
@@ -1224,27 +1224,27 @@ mod tests {
             }
             now_secs += 13;
         }
-        // 第 3 次慢死亡:窗口内 budget=3 → Fatal
+        // 第 3 次慢死亡：窗口内 budget=3 → Fatal
         assert!(fsm.is_fatal(), "连续慢死亡耗尽预算必须 Fatal");
         assert_eq!(fsm.state(), RecoveryState::Fatal);
     }
 
-    // ---- 边界(测试专家:变异存活):恰在 startup_grace 时刻的 Critical 受理 ----
+    // ---- 边界 (测试专家：变异存活):恰在 startup_grace 时刻的 Critical 受理 ----
     #[test]
     fn health_critical_exactly_at_startup_grace_enters_suspect() {
         let t0 = Instant::now();
         let mut fsm = fsm_at(t0, 2, 5, HungAction::Restart);
         let _ = fsm.on_spawn_result(t_at(t0, 1), Some(ident(100))); // Starting @ t0+1
-        // entered_at = t0+1;恰在 entered_at + STARTUP_GRACE(t0+31)的 Critical 必须受理
+        // entered_at = t0+1;恰在 entered_at + STARTUP_GRACE(t0+31) 的 Critical 必须受理
         let _ = fsm.on_health(t_at(t0, 1 + STARTUP_GRACE.as_secs()), HealthLevel::Critical);
         assert_eq!(
             fsm.state(),
             RecoveryState::Suspect,
-            "恰在 startup_grace 边界的 Critical 必须受理(>= 语义)"
+            "恰在 startup_grace 边界的 Critical 必须受理 (>= 语义)"
         );
     }
 
-    // ---- 陈旧身份(§8.3)忽略 ----
+    // ---- 陈旧身份 (§8.3) 忽略 ----
     #[test]
     fn child_exit_with_stale_identity_is_ignored() {
         let t0 = Instant::now();
@@ -1255,14 +1255,14 @@ mod tests {
         assert_eq!(fsm.state(), RecoveryState::Running);
     }
 
-    // ---- on_liveness_gone 累计到 confirmations 才触发(默认 2 次) ----
+    // ---- on_liveness_gone 累计到 confirmations 才触发 (默认 2 次) ----
     #[test]
     fn liveness_gone_requires_confirmations() {
         let t0 = Instant::now();
         let mut fsm = fsm_at(t0, 2, 5, HungAction::Restart);
         running(&mut fsm, t0, 100);
         let a1 = fsm.on_liveness_gone(t_at(t0, 90));
-        assert!(a1.is_empty(), "首次消失未达阈值,无动作");
+        assert!(a1.is_empty(), "首次消失未达阈值，无动作");
         assert_eq!(fsm.state(), RecoveryState::Running);
         let a2 = fsm.on_liveness_gone(t_at(t0, 95));
         assert_eq!(fsm.state(), RecoveryState::Recovering);
@@ -1313,7 +1313,7 @@ mod tests {
         assert_audit(&actions);
     }
 
-    // ---- confirmations=1:单次 Critical 直接恢复(边界语义) ----
+    // ---- confirmations=1:单次 Critical 直接恢复 (边界语义) ----
     #[test]
     fn confirmations_1_recovers_on_first_critical() {
         let t0 = Instant::now();
@@ -1373,7 +1373,7 @@ mod tests {
         assert_eq!(fsm.state(), RecoveryState::Recovering);
     }
 
-    // ---- §8.1/§8.2:恢复执行期间健康失败被忽略(防"刚重启被判挂死") ----
+    // ---- §8.1/§8.2:恢复执行期间健康失败被忽略 (防"刚重启被判挂死") ----
     #[test]
     fn health_critical_ignored_during_recovery() {
         let t0 = Instant::now();
@@ -1429,12 +1429,12 @@ mod tests {
     fn starting_moves_to_running_after_min_uptime_and_resets_backoff() {
         let t0 = Instant::now();
         let mut fsm = fsm_at(t0, 2, 5, HungAction::Restart);
-        // 先制造 backoff 档位:死亡一次再 spawn 成功
+        // 先制造 backoff 档位：死亡一次再 spawn 成功
         running(&mut fsm, t0, 100);
         let _ = fsm.on_child_exit(t_at(t0, 100), ident(100)); // backoff attempt=1
         let _ = fsm.on_spawn_result(t_at(t0, 102), Some(ident(101))); // Starting
         assert_eq!(fsm.state(), RecoveryState::Starting);
-        // 未到 min_uptime 的健康成功:停留 Starting
+        // 未到 min_uptime 的健康成功：停留 Starting
         let a = fsm.on_liveness_ok(t_at(t0, 105));
         assert!(a.is_empty());
         assert_eq!(fsm.state(), RecoveryState::Starting);
@@ -1442,7 +1442,7 @@ mod tests {
         let actions = fsm.on_liveness_ok(t_at(t0, 112));
         assert_eq!(fsm.state(), RecoveryState::Running);
         assert_audit(&actions);
-        // backoff 已重置:下次死亡又是首档 1s
+        // backoff 已重置：下次死亡又是首档 1s
         let actions = fsm.on_child_exit(t_at(t0, 200), ident(101));
         assert_eq!(find_schedule(&actions), Some(Duration::from_secs(1)));
     }
@@ -1473,7 +1473,7 @@ mod tests {
         assert!(find_schedule(&actions).is_some());
     }
 
-    // ---- F20 计划内级联停止:退出不计预算、不排程(第六轮评审 P3)----
+    // ---- F20 计划内级联停止：退出不计预算、不排程 (第六轮评审 P3)----
     #[test]
     fn planned_stop_does_not_record_budget_or_schedule_spawn() {
         let t0 = Instant::now();
@@ -1481,7 +1481,7 @@ mod tests {
         running(&mut fsm, t0, 100);
         let actions = fsm.on_planned_stop(t_at(t0, 111));
         assert_eq!(fsm.state(), RecoveryState::Restarting);
-        // 关键不变量:无 ScheduleSpawn(拉回由 F20 依赖门控负责)、无 JournalRestart
+        // 关键不变量：无 ScheduleSpawn(拉回由 F20 依赖门控负责)、无 JournalRestart
         // (预算持久化动作;计划内停止不得烧 dependent 预算)。
         assert!(
             find_schedule(&actions).is_none(),
@@ -1493,17 +1493,17 @@ mod tests {
                 .any(|a| matches!(a, RecoverAction::JournalRestart { .. })),
             "计划内停止不得产生预算事件"
         );
-        // 幂等收口:重复确认(如快照缺失与退出事件先后到达)不重复转移。
+        // 幂等收口：重复确认 (如快照缺失与退出事件先后到达) 不重复转移。
         let again = fsm.on_planned_stop(t_at(t0, 112));
         assert_eq!(fsm.state(), RecoveryState::Restarting);
         assert!(find_schedule(&again).is_none());
-        // 对照:同样的退出若走 on_child_exit(deterministic_death)会记录预算。
+        // 对照：同样的退出若走 on_child_exit(deterministic_death) 会记录预算。
         let mut fsm2 = fsm_at(t0, 2, 5, HungAction::Restart);
         running(&mut fsm2, t0, 100);
         let _ = fsm2.on_child_exit(t_at(t0, 111), ident(100));
         assert!(
             fsm2.budget.count(t_at(t0, 112)) >= 1,
-            "对照:确定性死亡路径必须计预算"
+            "对照：确定性死亡路径必须计预算"
         );
     }
 
@@ -1518,7 +1518,7 @@ mod tests {
         // grace=15s:未到点 on_tick/on_stop_result(false) 都不升级
         assert!(fsm.on_tick(t_at(t0, 120)).is_empty());
         assert!(fsm.on_stop_result(t_at(t0, 121), false).is_empty());
-        // 到点升级(tick 驱动)
+        // 到点升级 (tick 驱动)
         let actions = fsm.on_tick(t_at(t0, 125));
         assert_eq!(fsm.state(), RecoveryState::ForceKill);
         assert!(
@@ -1602,7 +1602,7 @@ mod tests {
         assert_eq!(
             fsm.restarts_in_window(t_at(t0, 101)),
             2,
-            "死亡与 spawn 失败均计数(§8.2 全量计数)"
+            "死亡与 spawn 失败均计数 (§8.2 全量计数)"
         );
         assert_eq!(
             find_schedule(&actions),
@@ -1611,9 +1611,9 @@ mod tests {
         );
     }
 
-    // ---- SCM 目标生命周期(on_scm_spawn_ok;ROADMAP 原生 Windows Service) ----
+    // ---- SCM 目标生命周期 (on_scm_spawn_ok;ROADMAP 原生 Windows Service) ----
 
-    /// on_scm_spawn_ok → Starting,不记 identity(last_spawn 保持 None)。
+    /// on_scm_spawn_ok → Starting，不记 identity(last_spawn 保持 None)。
     #[test]
     fn scm_spawn_ok_goes_starting_without_identity() {
         let t0 = Instant::now();
@@ -1627,7 +1627,7 @@ mod tests {
         assert_eq!(fsm.state(), RecoveryState::Running, "QueryStatus 证据推进");
     }
 
-    /// SCM 死亡路径:QueryStatus 消失经 on_liveness_gone(无身份匹配)驱动
+    /// SCM 死亡路径:QueryStatus 消失经 on_liveness_gone(无身份匹配) 驱动
     /// 确认死亡 → Recovering 排程;重启后再走 on_scm_spawn_ok 整链闭合。
     #[test]
     fn scm_lifecycle_death_via_liveness_gone_and_respawn() {
@@ -1636,7 +1636,7 @@ mod tests {
         let _ = fsm.on_scm_spawn_ok(t_at(t0, 1));
         let _ = fsm.on_liveness_ok(t_at(t0, 1 + MIN_UPTIME.as_secs()));
         assert_eq!(fsm.state(), RecoveryState::Running);
-        // 服务停止(外部或故障):连续 confirmations 次查询非 Running
+        // 服务停止 (外部或故障):连续 confirmations 次查询非 Running
         let a1 = fsm.on_liveness_gone(t_at(t0, 100));
         assert!(a1.is_empty(), "首次消失未达阈值");
         let a2 = fsm.on_liveness_gone(t_at(t0, 105));
@@ -1650,7 +1650,7 @@ mod tests {
         assert!(fsm.last_spawn.is_none());
     }
 
-    /// SCM 启动失败:与进程目标同路径(on_spawn_result(None) → CrashLoop 计入
+    /// SCM 启动失败：与进程目标同路径 (on_spawn_result(None) → CrashLoop 计入
     /// budget;SCM 诚实降级/服务启动失败都归此边)。
     #[test]
     fn scm_spawn_failure_counts_budget_like_process_path() {
@@ -1664,7 +1664,7 @@ mod tests {
         let actions = fsm.on_spawn_result(t_at(t0, 26), None);
         assert_eq!(fsm.state(), RecoveryState::CrashLoop);
         assert!(find_schedule(&actions).is_some());
-        // 死亡确认(25s)与 spawn 失败(26s)各计一次(§8.2 全量计数)
+        // 死亡确认 (25s) 与 spawn 失败 (26s) 各计一次 (§8.2 全量计数)
         assert_eq!(fsm.restarts_in_window(t_at(t0, 26)), 2);
     }
 
@@ -1725,7 +1725,7 @@ mod tests {
         let mut fsm = fsm_at(t0, 2, 3, HungAction::Restart); // max_restarts=3
         running(&mut fsm, t0, 100);
         let _ = fsm.on_child_exit(t_at(t0, 100), ident(100)); // budget=1(死亡计数)
-        // spawn 失败 ×2:第 3 次记录(即第 2 次 spawn 失败)budget=3 → Fatal
+        // spawn 失败 ×2:第 3 次记录 (即第 2 次 spawn 失败)budget=3 → Fatal
         let mut last = Vec::new();
         for i in 0..2u64 {
             let _ = fsm.on_tick(t_at(t0, 101 + 10 * i));
@@ -1737,11 +1737,11 @@ mod tests {
         assert_audit(&last);
     }
 
-    // ---- Fatal 态:一切触发忽略 ----
+    // ---- Fatal 态：一切触发忽略 ----
     #[test]
     fn fatal_ignores_all_triggers() {
         let t0 = Instant::now();
-        let mut fsm = fsm_at(t0, 2, 1, HungAction::Restart); // max_restarts=1,一次即 Fatal
+        let mut fsm = fsm_at(t0, 2, 1, HungAction::Restart); // max_restarts=1，一次即 Fatal
         running(&mut fsm, t0, 100);
         let _ = fsm.on_child_exit(t_at(t0, 100), ident(100));
         let _ = fsm.on_tick(t_at(t0, 101));
@@ -1760,12 +1760,12 @@ mod tests {
         assert_eq!(fsm.state(), RecoveryState::Fatal);
     }
 
-    // ---- §8.2 边:Fatal --reset--> Running,清预算,可再拉活 ----
+    // ---- §8.2 边:Fatal --reset--> Running，清预算，可再拉活 ----
     #[test]
     fn reset_releases_fatal_and_allows_recovery() {
         let t0 = Instant::now();
         // max_restarts=2:预算耗尽 → Fatal → reset 清零;reset 后单次慢死亡
-        // (budget=1 < 2)应正常进 Recovering 而非再次 Fatal。
+        // (budget=1 < 2) 应正常进 Recovering 而非再次 Fatal。
         let mut fsm = fsm_at(t0, 2, 2, HungAction::Restart);
         running(&mut fsm, t0, 100);
         let _ = fsm.on_child_exit(t_at(t0, 100), ident(100));
@@ -1825,7 +1825,7 @@ mod tests {
         let _ = fsm.on_health(t_at(t0, 110), HealthLevel::Critical); // RunActivate
         let _ = fsm.on_activate_result(t_at(t0, 112), true); // verify 至 132
         assert!(fsm.on_tick(t_at(t0, 130)).is_empty(), "观察期未到");
-        let actions = fsm.on_tick(t_at(t0, 132)); // 到点,观察期内仅有 Critical
+        let actions = fsm.on_tick(t_at(t0, 132)); // 到点，观察期内仅有 Critical
         assert_eq!(fsm.state(), RecoveryState::Recovering, "stop 待确认");
         assert!(
             actions
@@ -1862,7 +1862,7 @@ mod tests {
         assert!(find_schedule(&actions).is_some());
     }
 
-    // ---- observe 期内进程死亡:恢复失败 → 计入 budget 直接排重启 ----
+    // ---- observe 期内进程死亡：恢复失败 → 计入 budget 直接排重启 ----
     #[test]
     fn child_exit_during_verify_restarts_directly() {
         let t0 = Instant::now();
@@ -1888,8 +1888,8 @@ mod tests {
         let _ = fsm.on_health(t_at(t0, 100), HealthLevel::Critical);
         let _ = fsm.on_health(t_at(t0, 110), HealthLevel::Critical);
         let _ = fsm.on_activate_result(t_at(t0, 112), true);
-        let _ = fsm.on_health(t_at(t0, 120), HealthLevel::Warning); // 观察期内仅 Warning,无恢复
-        let actions = fsm.on_tick(t_at(t0, 132)); // 到点:最近反馈非 Ok → 停止并重启
+        let _ = fsm.on_health(t_at(t0, 120), HealthLevel::Warning); // 观察期内仅 Warning，无恢复
+        let actions = fsm.on_tick(t_at(t0, 132)); // 到点：最近反馈非 Ok → 停止并重启
         assert_eq!(fsm.state(), RecoveryState::Recovering, "stop 待确认");
         assert!(
             actions

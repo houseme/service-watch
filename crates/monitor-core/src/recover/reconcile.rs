@@ -11,10 +11,10 @@ use crate::model::ids::ProcessIdentity;
 use crate::model::snapshot::Degradation;
 
 /// 未验证身份的同 pid 不同 start_time 持续到本时长后裁决 Gone(第六轮评审 P2):
-/// spawn 侧本地钟与内核记账偏差 >±2s 时身份以 unverified 落盘,若旧进程死后 PID
-/// 被复用,`Some(_) => Pending` 分支没有任何出口 —— 对账永久挂起,服务永回不到
-/// 监管(且 journal ProcessIdentity 持久,每次重启都重新进入)。真实时钟偏差场景
-/// 内几乎必然先经历一次同身份匹配而 verified;超时放行是为 PID 复用兜底,偏保守。
+/// spawn 侧本地钟与内核记账偏差 >±2s 时身份以 unverified 落盘，若旧进程死后 PID
+/// 被复用，`Some(_) => Pending` 分支没有任何出口 —— 对账永久挂起，服务永回不到
+/// 监管 (且 journal ProcessIdentity 持久，每次重启都重新进入)。真实时钟偏差场景
+/// 内几乎必然先经历一次同身份匹配而 verified;超时放行是为 PID 复用兜底，偏保守。
 const RECONCILE_MISMATCH_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// 一次孤儿对账的结果。
@@ -36,7 +36,7 @@ pub struct OrphanTracker {
     verified: bool,
     started_at: Instant,
     observation: OrphanObservation,
-    /// 未验证身份出现"同 pid 不同 start_time"时的首个快照时刻(超时裁决 Gone;
+    /// 未验证身份出现"同 pid 不同 start_time"时的首个快照时刻 (超时裁决 Gone;
     /// 以快照 collected_at 为时钟)。
     mismatch_since: Option<Instant>,
 }
@@ -98,8 +98,8 @@ impl OrphanTracker {
             return self.observation;
         }
 
-        // 失配计时以快照时钟(collected_at,单调、随证据注入)为准:门控已保证
-        // 快照晚于 started_at,且每轮快照 collected_at 严格递增。
+        // 失配计时以快照时钟 (collected_at，单调、随证据注入) 为准：门控已保证
+        // 快照晚于 started_at，且每轮快照 collected_at 严格递增。
         self.observation = match output
             .processes
             .iter()
@@ -111,9 +111,9 @@ impl OrphanTracker {
                 OrphanObservation::Attached(self.identity)
             }
             Some(_) if self.verified => OrphanObservation::Gone,
-            // PID 复用嫌疑兜底:未验证身份的同 pid 不同 start_time 持续超过
-            // RECONCILE_MISMATCH_TIMEOUT → 裁决 Gone,恢复监管(否则对账永久
-            // Pending,见常量注)。
+            // PID 复用嫌疑兜底：未验证身份的同 pid 不同 start_time 持续超过
+            // RECONCILE_MISMATCH_TIMEOUT → 裁决 Gone，恢复监管 (否则对账永久
+            // Pending，见常量注)。
             Some(_) => {
                 let since = *self.mismatch_since.get_or_insert(output.collected_at);
                 if output.collected_at.duration_since(since) >= RECONCILE_MISMATCH_TIMEOUT {
@@ -326,8 +326,8 @@ mod tests {
     }
 
     /// 未验证身份的同 pid 不同 start_time 持续超时 → 裁决 Gone 恢复监管
-    /// (第六轮评审 P2:此前该分支无出口,时钟偏差写入的身份遇 PID 复用
-    /// 会让对账永久 Pending)。窗口内(含边界前)保持 Pending;同 pid 的
+    /// (第六轮评审 P2:此前该分支无出口，时钟偏差写入的身份遇 PID 复用
+    /// 会让对账永久 Pending)。窗口内 (含边界前) 保持 Pending;同 pid 的
     /// start_time 恢复匹配则立即 verified + Attached。
     #[test]
     fn unverified_prolonged_mismatch_releases_reused_pid() {
@@ -340,7 +340,7 @@ mod tests {
         let first = tracker.observe_with_presence(&output, |_| panic!("失配首观"));
         assert_eq!(first, OrphanObservation::Pending);
 
-        // 失配未满超时:保持 Pending
+        // 失配未满超时：保持 Pending
         let mut mid = output.clone();
         mid.collected_at =
             output.collected_at + RECONCILE_MISMATCH_TIMEOUT - Duration::from_secs(1);
@@ -349,7 +349,7 @@ mod tests {
             OrphanObservation::Pending
         );
 
-        // 超过超时:裁决 Gone
+        // 超过超时：裁决 Gone
         let mut late = output.clone();
         late.collected_at = output.collected_at + RECONCILE_MISMATCH_TIMEOUT;
         assert_eq!(
@@ -358,7 +358,7 @@ mod tests {
         );
         assert!(tracker.is_gone());
 
-        // 对照:失配期间 start_time 恢复匹配 → 立即 verified + Attached(不超时)
+        // 对照：失配期间 start_time 恢复匹配 → 立即 verified + Attached(不超时)
         let (mut tracker2, mut output2) = fixture(identity);
         tracker2.verified = false;
         output2

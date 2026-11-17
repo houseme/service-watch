@@ -1,4 +1,4 @@
-//! 共享数据模型(DESIGN.md §5)。
+//! 共享数据模型 (DESIGN.md §5)。
 
 pub mod alert;
 pub mod control;

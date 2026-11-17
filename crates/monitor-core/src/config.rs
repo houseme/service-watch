@@ -1,7 +1,7 @@
-//! 配置系统(DESIGN.md §4,权威 schema)。
+//! 配置系统 (DESIGN.md §4，权威 schema)。
 //!
-//! 解析 + 校验两层:serde 直接反序列化到强类型结构(`deny_unknown_fields`),
-//! 随后 [`Config::validate`] 执行交叉校验(§4.3)。违反任一规则即配置错误(退出码 1)。
+//! 解析 + 校验两层:serde 直接反序列化到强类型结构 (`deny_unknown_fields`),
+//! 随后 [`Config::validate`] 执行交叉校验 (§4.3)。违反任一规则即配置错误 (退出码 1)。
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::error::{CoreError, Result};
 
-/// 人类可读时长解析/序列化(`"500ms" | "5s" | "10m" | "1h"`,可组合如 `"1h30m"`)。
+/// 人类可读时长解析/序列化 (`"500ms" | "5s" | "10m" | "1h"`,可组合如 `"1h30m"`)。
 pub mod dur {
     use super::*;
     use serde::de::Error as _;
@@ -62,7 +62,7 @@ pub mod dur {
             return Err("duration must be positive".into());
         }
         // 巨大数值经乘法可溢出为 inf;from_secs_f64 对超域/inf 会 panic,
-        // 这里统一以 is_finite/try_from 拦截为配置错误(DESIGN §4.3:退出码 1,非 panic)。
+        // 这里统一以 is_finite/try_from 拦截为配置错误 (DESIGN §4.3:退出码 1，非 panic)。
         let secs = match unit {
             "ms" => v / 1000.0,
             "s" | "" => v,
@@ -99,7 +99,7 @@ pub mod dur {
         parse(&s).map_err(D::Error::custom)
     }
 
-    // ---- 各字段默认值(DESIGN.md §4.2 默认值总表) ----
+    // ---- 各字段默认值 (DESIGN.md §4.2 默认值总表) ----
     pub fn default_collect_interval() -> Duration {
         Duration::from_secs(5)
     }
@@ -258,7 +258,7 @@ impl Default for CollectCfg {
     }
 }
 
-/// Webhook payload 格式(DESIGN §7.3:Slack 兼容与通用 JSON 双格式)。
+/// Webhook payload 格式 (DESIGN §7.3:Slack 兼容与通用 JSON 双格式)。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WebhookFormat {
@@ -320,7 +320,7 @@ pub struct MetricsCfg {
     pub url: Option<url::Url>,
     #[serde(with = "dur", default = "dur::default_metrics_interval")]
     pub interval: Duration,
-    /// 单次推送超时(默认 10s;失败即放弃,下轮覆盖)。
+    /// 单次推送超时 (默认 10s;失败即放弃，下轮覆盖)。
     #[serde(with = "dur", default = "dur::default_alert_timeout")]
     pub timeout: Duration,
 }
@@ -336,7 +336,7 @@ impl Default for MetricsCfg {
     }
 }
 
-/// `""` / 缺省 → `None`;其余按 URL 解析(空字符串在示例配置中表示“关闭”)。
+/// `""` / 缺省 → `None`;其余按 URL 解析 (空字符串在示例配置中表示“关闭”)。
 fn opt_url_from_str<'de, D>(d: D) -> std::result::Result<Option<url::Url>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -355,7 +355,7 @@ where
 // ---------------------------------------------------------------------------
 
 /// 注意:`kind` 采用 `#[serde(flatten)]` + 内部 tagged enum(TOML 同层写法),
-/// serde 不允许 flatten 与 `deny_unknown_fields` 共存,故本结构放弃未知字段严格校验
+/// serde 不允许 flatten 与 `deny_unknown_fields` 共存，故本结构放弃未知字段严格校验
 /// (其余顶层/子表全部保持 `deny_unknown_fields`;未知 kind 值仍会被拒绝)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckCfg {
@@ -389,7 +389,7 @@ pub enum CheckKindCfg {
     },
 }
 
-/// 闭区间状态码范围,`"200-299"`(含边界)。serde 以字符串形式序列化。
+/// 闭区间状态码范围，`"200-299"`(含边界)。serde 以字符串形式序列化。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatusRange(pub u16, pub u16);
 
@@ -438,21 +438,21 @@ impl std::str::FromStr for StatusRange {
 }
 
 impl StatusRange {
-    /// `"LO-HI"` 形式(日志与错误信息用)。
+    /// `"LO-HI"` 形式 (日志与错误信息用)。
     pub fn serialize_as_string(&self) -> String {
         format!("{}-{}", self.0, self.1)
     }
 }
 
 // ---------------------------------------------------------------------------
-// 监管目标(supervise)与 attach 目标(watch)
+// 监管目标 (supervise) 与 attach 目标 (watch)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceCfg {
     pub name: String,
-    /// 普通 supervise 目标:可执行文件路径。与 [`Self::windows_service`] 二选一
+    /// 普通 supervise 目标：可执行文件路径。与 [`Self::windows_service`] 二选一
     /// (校验强制;缺省空串以便 SCM 目标省略此字段)。
     #[serde(default)]
     pub command: String,
@@ -462,20 +462,20 @@ pub struct ServiceCfg {
     pub workdir: Option<PathBuf>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// Windows:以 CREATE_NEW_PROCESS_GROUP 启动,允许尝试 CTRL_BREAK(不保证生效)。
+    /// Windows:以 CREATE_NEW_PROCESS_GROUP 启动，允许尝试 CTRL_BREAK(不保证生效)。
     #[serde(default)]
     pub console: bool,
-    /// 原生 Windows Service 目标(ROADMAP「原生 Windows Service 目标恢复」):
-    /// SCM 服务名(`sc create <name>` 的服务名,非显示名)。设置后启停完全由 SCM
-    /// 管理:spawn = `Start`(已 Running 视为成功,幂等)、stop = `Stop`、
+    /// 原生 Windows Service 目标 (ROADMAP「原生 Windows Service 目标恢复」):
+    /// SCM 服务名 (`sc create <name>` 的服务名，非显示名)。设置后启停完全由 SCM
+    /// 管理:spawn = `Start`(已 Running 视为成功，幂等)、stop = `Stop`、
     /// liveness = `QueryStatus == Running`;没有 (pid, start_time) 进程身份。
-    /// 与 command/args/workdir/env/console/activate 互斥(校验强制);
-    /// depends_on/restart 仍适用(恢复策略与启动编排不变)。
+    /// 与 command/args/workdir/env/console/activate 互斥 (校验强制);
+    /// depends_on/restart 仍适用 (恢复策略与启动编排不变)。
     /// 非 Windows 平台或未启用 `scm-target` feature 时 spawn 诚实降级为错误。
     #[serde(default)]
     pub windows_service: Option<String>,
-    /// 依赖的服务名(全部达到 Running 后本服务才被拉起;F20 启动编排)。
-    /// 引用必须存在、禁止自依赖与环(校验强制)。
+    /// 依赖的服务名 (全部达到 Running 后本服务才被拉起;F20 启动编排)。
+    /// 引用必须存在、禁止自依赖与环 (校验强制)。
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
@@ -572,7 +572,7 @@ impl Config {
         Self::from_toml_str(&s)
     }
 
-    /// DESIGN.md §4.3 交叉校验。返回全部违规项(一次性报完,便于用户修正)。
+    /// DESIGN.md §4.3 交叉校验。返回全部违规项 (一次性报完，便于用户修正)。
     pub fn validate(&self) -> std::result::Result<(), Vec<String>> {
         let mut errs = Vec::new();
         let say = |errs: &mut Vec<String>, msg: String| errs.push(msg);
@@ -632,7 +632,7 @@ impl Config {
                     ),
                 );
             }
-            // 下界(第五轮评审 P3):过小的 interval 使探测/采集本身成为负载源
+            // 下界 (第五轮评审 P3):过小的 interval 使探测/采集本身成为负载源
             // (sysinfo 全刷新 1ms 周期可拖垮宿主)。100ms = 探测可用下限。
             if c.interval < Duration::from_millis(100) {
                 say(
@@ -694,8 +694,8 @@ impl Config {
             if s.name.trim().is_empty() {
                 say(&mut errs, "service: name is blank".to_string());
             }
-            // windows_service 目标形态(ROADMAP「原生 Windows Service 目标恢复」):
-            // command 二选一;SCM 管理启停,进程级启动参数一律无意义。
+            // windows_service 目标形态 (ROADMAP「原生 Windows Service 目标恢复」):
+            // command 二选一;SCM 管理启停，进程级启动参数一律无意义。
             let scm = s.windows_service.as_deref();
             if scm.is_some_and(|name| name.trim().is_empty()) {
                 say(
@@ -709,7 +709,7 @@ impl Config {
                         say(
                             &mut errs,
                             format!(
-                                "service {:?}: windows_service 与 command 必须且只能配置一个(SCM 管理启停,不接受本地命令)",
+                                "service {:?}: windows_service 与 command 必须且只能配置一个 (SCM 管理启停，不接受本地命令)",
                                 s.name
                             ),
                         );
@@ -835,7 +835,7 @@ impl Config {
             }
         }
 
-        // collect / alert 段(第五轮评审 P3:此前零校验)
+        // collect / alert 段 (第五轮评审 P3:此前零校验)
         if self.agent.data_dir.as_os_str().is_empty() {
             say(&mut errs, "agent: data_dir is blank".into());
         }
@@ -877,7 +877,7 @@ impl Config {
             );
         }
 
-        // depends_on(F20 启动编排):引用存在、无自依赖、无环(迭代 DFS 三色标记)
+        // depends_on(F20 启动编排):引用存在、无自依赖、无环 (迭代 DFS 三色标记)
         {
             let names: std::collections::HashSet<&str> =
                 self.services.iter().map(|s| s.name.as_str()).collect();
@@ -901,7 +901,7 @@ impl Config {
                 .iter()
                 .map(|s| (s.name.as_str(), 0u8))
                 .collect();
-            // 迭代 DFS:灰(1)=栈中,黑(2)=完成;回到灰节点即环
+            // 迭代 DFS:灰 (1)=栈中，黑 (2)=完成;回到灰节点即环
             for s in &self.services {
                 let mut stack: Vec<(&str, usize)> = vec![(s.name.as_str(), 0)];
                 while let Some((node, idx)) = stack.pop() {
@@ -915,7 +915,7 @@ impl Config {
                         .map(|sv| sv.depends_on.iter().map(String::as_str).collect())
                         .unwrap_or_default();
                     if idx < deps.len() {
-                        // 标灰(node 在栈中)
+                        // 标灰 (node 在栈中)
                         if color.get(node).copied() == Some(0) {
                             color.insert(node, 1);
                         }
@@ -923,7 +923,7 @@ impl Config {
                         let next = deps[idx];
                         match color.get(next).copied() {
                             Some(1) => {
-                                say(&mut errs, format!("service 依赖环:经过 {next:?}"));
+                                say(&mut errs, format!("service 依赖环：经过 {next:?}"));
                             }
                             Some(2) => {}
                             _ => stack.push((next, 0)),
@@ -935,7 +935,7 @@ impl Config {
             }
         }
 
-        // [metrics] 推送(ROADMAP「指标周期推送」)
+        // [metrics] 推送 (ROADMAP「指标周期推送」)
         if self.metrics.enabled {
             match &self.metrics.url {
                 None => say(&mut errs, "[metrics] enabled = true 需要 url".to_string()),
@@ -958,7 +958,7 @@ impl Config {
             }
         }
 
-        // name 唯一(三个空间独立)
+        // name 唯一 (三个空间独立)
         for (label, list) in [
             (
                 "check",
@@ -1100,7 +1100,7 @@ mod tests {
         assert!(err.contains("must be < interval"), "{err}");
     }
 
-    /// interval 下界(第五轮评审 P3):check/collect 过小 → 校验拒绝(负载源防护)。
+    /// interval 下界 (第五轮评审 P3):check/collect 过小 → 校验拒绝 (负载源防护)。
     #[test]
     fn rejects_intervals_below_floor() {
         let check_small = r#"
@@ -1125,7 +1125,7 @@ mod tests {
         assert!(err.contains("collect"), "{err}");
     }
 
-    /// deadman_url scheme 校验(第五轮评审 P3):非 http/https 拒绝。
+    /// deadman_url scheme 校验 (第五轮评审 P3):非 http/https 拒绝。
     #[test]
     fn rejects_deadman_non_http_scheme() {
         let s = r#"
@@ -1178,9 +1178,9 @@ mod tests {
         assert!(Config::from_toml_str(s).is_err());
     }
 
-    // ---- windows_service(SCM 目标)校验:二选一与互斥(ROADMAP 原生 Windows Service) ----
+    // ---- windows_service(SCM 目标) 校验：二选一与互斥 (ROADMAP 原生 Windows Service) ----
 
-    /// 合法 SCM 目标:name + windows_service,依赖与恢复策略照常适用。
+    /// 合法 SCM 目标:name + windows_service，依赖与恢复策略照常适用。
     #[test]
     fn accepts_scm_target_with_restart_and_deps() {
         let s = r#"
@@ -1200,7 +1200,7 @@ mod tests {
         assert_eq!(cfg.services[0].depends_on, vec!["db".to_string()]);
     }
 
-    /// SCM 目标与 command/args/workdir/env/console/activate 互斥(逐项)。
+    /// SCM 目标与 command/args/workdir/env/console/activate 互斥 (逐项)。
     #[test]
     fn rejects_scm_target_with_process_launch_fields() {
         let cases = [
@@ -1227,7 +1227,7 @@ mod tests {
         assert!(err.contains("activate"), "{err}");
     }
 
-    /// 二选一:两边都配置 / 两边都缺 / windows_service 空白,全部拒绝。
+    /// 二选一：两边都配置 / 两边都缺 / windows_service 空白，全部拒绝。
     #[test]
     fn rejects_scm_and_command_mutual_exclusion_violations() {
         let both = r#"

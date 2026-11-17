@@ -1,33 +1,33 @@
-//! incident 去噪与生命周期(DESIGN.md §7.2 —— SRE review 修订的核心)。
+//! incident 去噪与生命周期 (DESIGN.md §7.2 —— SRE review 修订的核心)。
 //!
-//! 规则(实现代理 B 必须逐条覆盖单测):
+//! 规则 (实现代理 B 必须逐条覆盖单测):
 //! 1. incident key = hash(target, check),不含 severity/reason;
 //! 2. incident 首次通知**永不抑制**;
 //! 3. 持续期同 severity 重复通知受 `renotify_interval` 抑制;Escalate 总是发送;
 //! 4. Resolve 引用原 incident;仅当该 incident 曾发出过通知时才产生;
-//! 5. flap:`flap_window` 内 open/close ≥ `flap_threshold` → 抑制,只发一条
-//!    `Flap` 摘要(含计数);抑制期随窗口滑动自然解除。
+//! 5. flap:`flap_window` 内 open/close ≥ `flap_threshold` → 抑制，只发一条
+//!    `Flap` 摘要 (含计数);抑制期随窗口滑动自然解除。
 //!
 //! ## 调用约定
 //!
 //! [`IncidentTracker::observe`] 在**每次探测完成后**以检查状态机的**当前级别**调用
-//! (不必只在级别转移时调用):同一级别重复观测由 renotify 间隔判定是否重发,
-//! `Ok` 表示本次观测恢复。两种喂法(仅转移 / 每轮喂)均正确;每轮喂才能触发 renotify。
+//! (不必只在级别转移时调用):同一级别重复观测由 renotify 间隔判定是否重发，
+//! `Ok` 表示本次观测恢复。两种喂法 (仅转移 / 每轮喂) 均正确;每轮喂才能触发 renotify。
 //!
-//! ## 时钟纪律(DESIGN §5)
+//! ## 时钟纪律 (DESIGN §5)
 //!
-//! `now_mono`(单调)用于一切时长判定(renotify 间隔、flap 窗口/解除)——
-//! 墙钟回拨会永久抑制重通知、前跳会造成虚假重发(并发评审 P1);`now_wall`
-//! 仅作事件时间戳(first_seen/last_seen 展示)。
+//! `now_mono`(单调) 用于一切时长判定 (renotify 间隔、flap 窗口/解除)——
+//! 墙钟回拨会永久抑制重通知、前跳会造成虚假重发 (并发评审 P1);`now_wall`
+//! 仅作事件时间戳 (first_seen/last_seen 展示)。
 //!
-//! ## 实现取舍(DESIGN §7.2 规则 5 细化)
+//! ## 实现取舍 (DESIGN §7.2 规则 5 细化)
 //!
-//! - 进入 flap 抑制的那一刻,与跨越阈值那次转移同时发生的 Alert/Resolve 被**吞掉**,
-//!   只发那一条 `Flap` 摘要;抑制期内 Escalate 同样吞掉(trail 状态仍照常更新,
+//! - 进入 flap 抑制的那一刻，与跨越阈值那次转移同时发生的 Alert/Resolve 被**吞掉**,
+//!   只发那一条 `Flap` 摘要;抑制期内 Escalate 同样吞掉 (trail 状态仍照常更新，
 //!   解除后可据此发出正确 severity 的通知)。
 //! - `Flap` 摘要**不计入** `notified`:只听说过"在抖动"的观察者不应收到一条凭空的 Resolve。
-//! - incident 关闭(Resolve)即从 trails 移除:复发是**新 incident**,首次通知不受
-//!   上一起的 `last_notified` 冷却影响(规则 2 的关键)。open/close 时间戳留在
+//! - incident 关闭 (Resolve) 即从 trails 移除：复发是**新 incident**,首次通知不受
+//!   上一起的 `last_notified` 冷却影响 (规则 2 的关键)。open/close 时间戳留在
 //!   `transitions` 环里供 flap 判定跨 incident 累计。
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -37,23 +37,23 @@ use crate::config::AlertCfg;
 use crate::model::alert::{AlertEvent, Category, Severity};
 use crate::model::control::HealthLevel;
 
-/// transitions 环的硬上限(防御病态抖动下的内存增长;窗口内计数才是判定依据)。
+/// transitions 环的硬上限 (防御病态抖动下的内存增长;窗口内计数才是判定依据)。
 const TRANSITIONS_RING_CAP: usize = 1024;
 
-/// 每个 incident 的运行时轨迹(open 期间存在,Resolve 即移除)。
+/// 每个 incident 的运行时轨迹 (open 期间存在，Resolve 即移除)。
 #[derive(Debug, Clone)]
 struct IncidentTrail {
-    /// 当前级别(供 /status 与 renotify severity)。
+    /// 当前级别 (供 /status 与 renotify severity)。
     level: HealthLevel,
-    /// 本次 incident 生存期内达到过的最高级别(Resolve 携带其 severity)。
+    /// 本次 incident 生存期内达到过的最高级别 (Resolve 携带其 severity)。
     peak: HealthLevel,
     /// 打开以来失败观测次数。
     occurrences: u64,
     first_seen: SystemTime,
     last_seen: SystemTime,
-    /// 已对外发出过通知(Alert/Escalate;决定 Resolve 是否产生)。
+    /// 已对外发出过通知 (Alert/Escalate;决定 Resolve 是否产生)。
     notified: bool,
-    /// 上次通知时刻(renotify 间隔判定;单调时钟)。
+    /// 上次通知时刻 (renotify 间隔判定;单调时钟)。
     last_notified: Option<Instant>,
 }
 
@@ -62,12 +62,12 @@ pub struct IncidentTracker {
     cfg: AlertCfg,
     trails: HashMap<u64, IncidentTrail>,
     /// flap 环形记录:key → (open/close 时刻),仅保留 flap_window 内。
-    /// (单调时刻用于窗口判定,墙钟用于 Flap 摘要的 first_seen 展示。)
+    /// (单调时刻用于窗口判定，墙钟用于 Flap 摘要的 first_seen 展示。)
     transitions: HashMap<u64, VecDeque<(Instant, SystemTime)>>,
     flap_suppressed: HashSet<u64>,
 }
 
-/// 健康级别排序(Ok < Warning < Critical)。
+/// 健康级别排序 (Ok < Warning < Critical)。
 fn rank(level: HealthLevel) -> u8 {
     match level {
         HealthLevel::Ok => 0,
@@ -83,7 +83,7 @@ fn severity_of(level: HealthLevel) -> Severity {
     }
 }
 
-/// 一次观测的定位信息(incident key + 事件标签),收敛内部分派函数的参数数量。
+/// 一次观测的定位信息 (incident key + 事件标签),收敛内部分派函数的参数数量。
 struct Observed<'a> {
     key: u64,
     target: &'a str,
@@ -100,8 +100,8 @@ impl IncidentTracker {
         }
     }
 
-    /// 观测一次级别(来自检查状态机;Ok 表示无 incident)。
-    /// 返回本次需要投递的事件列表(已应用全部去噪规则)。
+    /// 观测一次级别 (来自检查状态机;Ok 表示无 incident)。
+    /// 返回本次需要投递的事件列表 (已应用全部去噪规则)。
     #[allow(clippy::too_many_arguments)]
     pub fn observe(
         &mut self,
@@ -126,14 +126,14 @@ impl IncidentTracker {
         }
     }
 
-    /// 当前未闭合 incident 的最高级别(供 /status)。
+    /// 当前未闭合 incident 的最高级别 (供 /status)。
     pub fn incident_level(&self, target: &str, check: &str) -> Option<HealthLevel> {
         let key = AlertEvent::incident_key(target, check);
         self.trails.get(&key).map(|t| t.level)
     }
 
-    /// 清除指定 (target, check) 的全部去噪状态(trail/flap 环/抑制),
-    /// 供控制平面 reset 使用:清除后立即复发按**新 incident** 处理。
+    /// 清除指定 (target, check) 的全部去噪状态 (trail/flap 环/抑制),
+    /// 供控制平面 reset 使用：清除后立即复发按**新 incident** 处理。
     pub fn clear(&mut self, target: &str, check: &str) {
         let key = AlertEvent::incident_key(target, check);
         self.trails.remove(&key);
@@ -142,7 +142,7 @@ impl IncidentTracker {
     }
 
     // -----------------------------------------------------------------
-    // Ok 观测:闭合 trail → 可能 Resolve / flap 跨越
+    // Ok 观测：闭合 trail → 可能 Resolve / flap 跨越
     // -----------------------------------------------------------------
 
     fn observe_ok(
@@ -157,13 +157,13 @@ impl IncidentTracker {
         self.prune_and_maybe_release(ctx.key, now_mono);
 
         if let Some(trail) = self.trails.remove(&ctx.key) {
-            // close 转移:计入 flap 环。
+            // close 转移：计入 flap 环。
             self.record_transition(ctx.key, now, now_mono);
             let count = self.window_count(ctx.key, now_mono);
             let newly_suppressed =
                 count >= self.flap_threshold() && self.flap_suppressed.insert(ctx.key);
             if newly_suppressed {
-                // 跨越阈值的一刻:吞掉 Resolve,只发 Flap 摘要。
+                // 跨越阈值的一刻：吞掉 Resolve，只发 Flap 摘要。
                 events.push(self.flap_event(ctx, now, count, Some(&trail)));
             } else if !self.flap_suppressed.contains(&ctx.key) {
                 // 规则 4:仅当曾发出过通知才产生 Resolve;severity 用历史最高级别。
@@ -182,13 +182,13 @@ impl IncidentTracker {
                     });
                 }
             }
-            // 抑制期内:Resolve 吞掉(trail 已移除 = incident 已闭合)。
+            // 抑制期内:Resolve 吞掉 (trail 已移除 = incident 已闭合)。
         }
         events
     }
 
     // -----------------------------------------------------------------
-    // Warning/Critical 观测:open / 持续(renotify)/ 升级
+    // Warning/Critical 观测:open / 持续 (renotify)/ 升级
     // -----------------------------------------------------------------
 
     fn observe_failure(
@@ -205,7 +205,7 @@ impl IncidentTracker {
         let suppressed = self.flap_suppressed.contains(&ctx.key);
 
         if let Some(trail) = self.trails.get_mut(&ctx.key) {
-            // 持续期:累计 + 判定升级。
+            // 持续期：累计 + 判定升级。
             trail.occurrences = trail.occurrences.saturating_add(1);
             trail.last_seen = now;
             let escalated = level == HealthLevel::Critical && trail.level == HealthLevel::Warning;
@@ -219,7 +219,7 @@ impl IncidentTracker {
             if !suppressed {
                 if escalated {
                     if trail.notified {
-                        // 规则 3:Escalate 总是发送(不受 renotify 间隔约束)。
+                        // 规则 3:Escalate 总是发送 (不受 renotify 间隔约束)。
                         events.push(make_event(
                             ctx.key,
                             Category::Escalate,
@@ -232,7 +232,7 @@ impl IncidentTracker {
                             now,
                         ));
                     } else {
-                        // 升级但从未通知过(如抑制期吞掉了首次 Alert):按首次通知发。
+                        // 升级但从未通知过 (如抑制期吞掉了首次 Alert):按首次通知发。
                         events.push(make_event(
                             ctx.key,
                             Category::Alert,
@@ -248,7 +248,7 @@ impl IncidentTracker {
                     trail.notified = true;
                     trail.last_notified = Some(now_mono);
                 } else if !trail.notified {
-                    // 规则 2:首次通知永不抑制(抑制解除后补发的首次通知也走这里)。
+                    // 规则 2:首次通知永不抑制 (抑制解除后补发的首次通知也走这里)。
                     let severity = severity_of(trail.level);
                     events.push(make_event(
                         ctx.key,
@@ -264,7 +264,7 @@ impl IncidentTracker {
                     trail.notified = true;
                     trail.last_notified = Some(now_mono);
                 } else if let Some(last) = trail.last_notified {
-                    // 规则 3:同 severity 持续期重发受 renotify_interval 抑制(单调时钟)。
+                    // 规则 3:同 severity 持续期重发受 renotify_interval 抑制 (单调时钟)。
                     if now_mono.duration_since(last) >= self.cfg.renotify_interval {
                         let severity = severity_of(trail.level);
                         events.push(make_event(
@@ -282,9 +282,9 @@ impl IncidentTracker {
                     }
                 }
             }
-            // 抑制期内:所有通知吞掉,trail 状态已更新。
+            // 抑制期内：所有通知吞掉，trail 状态已更新。
         } else {
-            // open 转移:计入 flap 环并新建 trail。
+            // open 转移：计入 flap 环并新建 trail。
             self.record_transition(ctx.key, now, now_mono);
             let count = self.window_count(ctx.key, now_mono);
             let trail = IncidentTrail {
@@ -301,7 +301,7 @@ impl IncidentTracker {
             let newly_suppressed =
                 count >= self.flap_threshold() && self.flap_suppressed.insert(ctx.key);
             if newly_suppressed {
-                // 跨越阈值的一刻:吞掉本次 Alert,只发 Flap 摘要(notified 保持 false)。
+                // 跨越阈值的一刻：吞掉本次 Alert，只发 Flap 摘要 (notified 保持 false)。
                 events.push(self.flap_event(ctx, now, count, None));
             } else if !suppressed {
                 // 规则 2:首次通知永不抑制 —— 不受任何历史 last_notified 冷却影响。
@@ -330,12 +330,12 @@ impl IncidentTracker {
     // 内部工具
     // -----------------------------------------------------------------
 
-    /// flap 阈值(下限 1,防配置为 0 时恒抑制)。
+    /// flap 阈值 (下限 1，防配置为 0 时恒抑制)。
     fn flap_threshold(&self) -> usize {
         self.cfg.flap_threshold.max(1) as usize
     }
 
-    /// 记录一次 open/close 转移时间戳(单调 + 墙钟)。
+    /// 记录一次 open/close 转移时间戳 (单调 + 墙钟)。
     fn record_transition(&mut self, key: u64, at_wall: SystemTime, at_mono: Instant) {
         let ring = self.transitions.entry(key).or_default();
         ring.push_back((at_mono, at_wall));
@@ -344,7 +344,7 @@ impl IncidentTracker {
         }
     }
 
-    /// 窗口内 open+close 转移总数(单调时钟判定;调用前应已 prune)。
+    /// 窗口内 open+close 转移总数 (单调时钟判定;调用前应已 prune)。
     fn window_count(&self, key: u64, now_mono: Instant) -> usize {
         self.transitions
             .get(&key)
@@ -356,7 +356,7 @@ impl IncidentTracker {
             .unwrap_or(0)
     }
 
-    /// 滑出窗口的旧转移;若抑制中且窗口内计数已低于阈值 → 自动解除(规则 5)。
+    /// 滑出窗口的旧转移;若抑制中且窗口内计数已低于阈值 → 自动解除 (规则 5)。
     fn prune_and_maybe_release(&mut self, key: u64, now_mono: Instant) {
         if let Some(ring) = self.transitions.get_mut(&key) {
             while let Some(&(t, _)) = ring.front() {
@@ -377,9 +377,9 @@ impl IncidentTracker {
         }
     }
 
-    /// Flap 摘要事件(category=Flap,occurrences=窗口内转移数)。
-    /// first_seen 取窗口内最早转移时刻(摘要覆盖整段抖动);severity 取当前
-    /// trail 的历史最高级别(无 trail 时 Warning 兜底)。
+    /// Flap 摘要事件 (category=Flap,occurrences=窗口内转移数)。
+    /// first_seen 取窗口内最早转移时刻 (摘要覆盖整段抖动);severity 取当前
+    /// trail 的历史最高级别 (无 trail 时 Warning 兜底)。
     fn flap_event(
         &self,
         ctx: &Observed<'_>,
@@ -415,7 +415,7 @@ impl IncidentTracker {
     }
 }
 
-/// 通用事件构造(字段取自 trail 当前状态;自由函数以便在 `get_mut` 作用域内调用)。
+/// 通用事件构造 (字段取自 trail 当前状态;自由函数以便在 `get_mut` 作用域内调用)。
 #[allow(clippy::too_many_arguments)]
 fn make_event(
     key: u64,
@@ -443,7 +443,7 @@ fn make_event(
 }
 
 // ---------------------------------------------------------------------------
-// 测试:与 §7.2 规则一一对应(时间全部注入,不依赖真实时钟)
+// 测试：与 §7.2 规则一一对应 (时间全部注入，不依赖真实时钟)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -452,13 +452,13 @@ mod tests {
     use std::sync::OnceLock;
     use std::time::Duration;
 
-    /// 单调时钟测试基点(进程内恒定,与墙钟注入同刻度推进)。
+    /// 单调时钟测试基点 (进程内恒定，与墙钟注入同刻度推进)。
     fn m0_base() -> Instant {
         static M0: OnceLock<Instant> = OnceLock::new();
         *M0.get_or_init(Instant::now)
     }
 
-    /// 构造 AlertCfg:renotify 间隔 / flap 窗口 / flap 阈值可调,其余默认。
+    /// 构造 AlertCfg:renotify 间隔 / flap 窗口 / flap 阈值可调，其余默认。
     fn cfg(renotify_secs: u64, flap_window_secs: u64, flap_threshold: u32) -> AlertCfg {
         AlertCfg {
             renotify_interval: Duration::from_secs(renotify_secs),
@@ -468,12 +468,12 @@ mod tests {
         }
     }
 
-    /// 注入时刻:`SystemTime::UNIX_EPOCH + secs`(墙钟,事件时间戳用)。
+    /// 注入时刻:`SystemTime::UNIX_EPOCH + secs`(墙钟，事件时间戳用)。
     fn t(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
     }
 
-    /// 注入时刻(单调,时长判定用):以真实 Instant 为基,与墙钟同刻度推进。
+    /// 注入时刻 (单调，时长判定用):以真实 Instant 为基，与墙钟同刻度推进。
     fn mono(secs: u64) -> Instant {
         m0_base() + Duration::from_secs(secs)
     }
@@ -515,7 +515,7 @@ mod tests {
         assert_ne!(other[0].incident, key);
     }
 
-    // 规则 2:首次通知永不抑制 —— Resolve 后立刻复发,新 Alert 不受上一起
+    // 规则 2:首次通知永不抑制 —— Resolve 后立刻复发，新 Alert 不受上一起
     // incident 的 last_notified 冷却影响。
     #[test]
     fn rule2_recurrence_right_after_resolve_alerts_immediately() {
@@ -547,7 +547,7 @@ mod tests {
             "Resolve 携带历史最高 severity"
         );
 
-        // 距上次通知仅 1s,远小于 renotify_interval(900s):复发必须立即通知。
+        // 距上次通知仅 1s，远小于 renotify_interval(900s):复发必须立即通知。
         let again = tr.observe(
             t(3),
             mono(3),
@@ -572,7 +572,7 @@ mod tests {
                 .is_empty()
         );
 
-        // 间隔内重复观测:抑制。
+        // 间隔内重复观测：抑制。
         assert!(
             tr.observe(
                 t(30),
@@ -587,7 +587,7 @@ mod tests {
             "renotify_interval 内的重发必须被抑制"
         );
 
-        // 超过间隔(61s ≥ 60s):同 severity 重发。
+        // 超过间隔 (61s ≥ 60s):同 severity 重发。
         let re = tr.observe(
             t(61),
             mono(61),
@@ -602,7 +602,7 @@ mod tests {
         assert_eq!(re[0].severity, Severity::Warning);
         assert_eq!(re[0].occurrences, 3);
 
-        // 重发后重新计时:间隔内再次抑制。
+        // 重发后重新计时：间隔内再次抑制。
         assert!(
             tr.observe(
                 t(90),
@@ -617,7 +617,7 @@ mod tests {
         );
     }
 
-    // 规则 3 边界:恰好等于 renotify_interval 必须重发(锁定 >= 语义,杀伤 > 变异)。
+    // 规则 3 边界：恰好等于 renotify_interval 必须重发 (锁定 >= 语义，杀伤 > 变异)。
     #[test]
     fn rule3_renotify_at_exact_interval() {
         let mut tr = IncidentTracker::new(cfg(60, 3600, 100));
@@ -648,7 +648,7 @@ mod tests {
             "fail",
             None,
         );
-        assert_eq!(re.len(), 1, "恰好 renotify_interval 必须重发(>= 边界)");
+        assert_eq!(re.len(), 1, "恰好 renotify_interval 必须重发 (>= 边界)");
         // 重发后 interval-1:再次抑制
         assert!(
             tr.observe(
@@ -664,7 +664,7 @@ mod tests {
         );
     }
 
-    // 规则 3 补充:Escalate(Warning → Critical)总是发送,不受 renotify 间隔约束。
+    // 规则 3 补充:Escalate(Warning → Critical) 总是发送，不受 renotify 间隔约束。
     #[test]
     fn escalate_always_sent_despite_recent_notification() {
         let mut tr = IncidentTracker::new(cfg(900, 3600, 100));
@@ -677,8 +677,8 @@ mod tests {
         assert_eq!(tr.incident_level("a", "c"), Some(HealthLevel::Critical));
     }
 
-    // 规则 4:Resolve 引用原 incident,仅当曾发出过通知时才产生。
-    // 通过 flap 抑制构造"从未通知过"的 incident(threshold=3:open2 跨越阈值,
+    // 规则 4:Resolve 引用原 incident，仅当曾发出过通知时才产生。
+    // 通过 flap 抑制构造"从未通知过"的 incident(threshold=3:open2 跨越阈值，
     // Alert 被吞 → trail.notified = false → close 不产生 Resolve)。
     #[test]
     fn rule4_resolve_only_when_previously_notified() {
@@ -687,11 +687,11 @@ mod tests {
         let e1 = tr.observe(t(0), mono(0), "a", "c", HealthLevel::Warning, "fail", None);
         assert_eq!(e1.len(), 1);
         assert_eq!(e1[0].category, Category::Alert);
-        // close1:count=2 < 3,已通知 → Resolve。
+        // close1:count=2 < 3，已通知 → Resolve。
         let e2 = tr.observe(t(1), mono(1), "a", "c", HealthLevel::Ok, "ok", None);
         assert_eq!(e2.len(), 1);
         assert_eq!(e2[0].category, Category::Resolve);
-        // open2:count=3 → 跨越阈值 → Flap 摘要,Alert 被吞。
+        // open2:count=3 → 跨越阈值 → Flap 摘要，Alert 被吞。
         let e3 = tr.observe(t(2), mono(2), "a", "c", HealthLevel::Warning, "fail", None);
         assert_eq!(e3.len(), 1);
         assert_eq!(e3[0].category, Category::Flap);
@@ -701,7 +701,7 @@ mod tests {
                 .is_empty(),
             "未通知过的 incident 不得产生 Resolve"
         );
-        // 抑制期内继续抖动:Alert/Resolve 全部吞掉,不再重复发 Flap。
+        // 抑制期内继续抖动:Alert/Resolve 全部吞掉，不再重复发 Flap。
         assert!(
             tr.observe(t(4), mono(4), "a", "c", HealthLevel::Warning, "fail", None)
                 .is_empty()
@@ -743,7 +743,7 @@ mod tests {
             "Flap 引用首起 incident 的 first_seen"
         );
 
-        // 抑制期内:Alert/Escalate/Resolve 全部吞掉,不再重复 Flap。
+        // 抑制期内:Alert/Escalate/Resolve 全部吞掉，不再重复 Flap。
         assert!(
             tr.observe(t(3), mono(3), "a", "c", HealthLevel::Ok, "ok", None)
                 .is_empty()
@@ -755,11 +755,11 @@ mod tests {
         let esc = tr.observe(t(5), mono(5), "a", "c", HealthLevel::Critical, "fail", None);
         assert!(
             esc.is_empty(),
-            "抑制期内 Escalate 一并吞掉(trail 状态仍更新)"
+            "抑制期内 Escalate 一并吞掉 (trail 状态仍更新)"
         );
         assert_eq!(tr.incident_level("a", "c"), Some(HealthLevel::Critical));
 
-        // 窗口滑动:t0..t5 全部滑出(window=100)→ 计数 0 < 3 → 自动解除。
+        // 窗口滑动:t0..t5 全部滑出 (window=100)→ 计数 0 < 3 → 自动解除。
         // 解除时闭合未通知过的 trail:不补发 Resolve。
         assert!(
             tr.observe(t(200), mono(200), "a", "c", HealthLevel::Ok, "ok", None)
@@ -835,7 +835,7 @@ mod tests {
         );
     }
 
-    // clear(reset 控制平面):trail/flap 环/抑制全部清空,复发按新 incident 处理。
+    // clear(reset 控制平面):trail/flap 环/抑制全部清空，复发按新 incident 处理。
     #[test]
     fn clear_drops_trail_and_suppression() {
         let mut tr = IncidentTracker::new(cfg(900, 3600, 3));
@@ -852,13 +852,13 @@ mod tests {
             "clear 后无未闭合 incident"
         );
 
-        // 清除后立即复发:不受抑制与冷却影响。
+        // 清除后立即复发：不受抑制与冷却影响。
         let e = tr.observe(t(3), mono(3), "a", "c", HealthLevel::Warning, "fail", None);
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].category, Category::Alert);
     }
 
-    // 升级但从未通知过(抑制期吞掉了首次 Alert,随后解除):按首次通知补发。
+    // 升级但从未通知过 (抑制期吞掉了首次 Alert，随后解除):按首次通知补发。
     #[test]
     fn unnotified_escalation_sends_alert_not_escalate() {
         let mut tr = IncidentTracker::new(cfg(900, 3600, 3));
@@ -866,7 +866,7 @@ mod tests {
         tr.observe(t(1), mono(1), "a", "c", HealthLevel::Ok, "ok", None);
         tr.observe(t(2), mono(2), "a", "c", HealthLevel::Warning, "fail", None); // 跨越 → Flap,Alert 吞
         tr.observe(t(3), mono(3), "a", "c", HealthLevel::Critical, "fail", None); // 抑制内 Escalate 吞
-        // 窗口滑出解除后:trail 未通知过 → 以当前(Critical)级别补发首次 Alert。
+        // 窗口滑出解除后:trail 未通知过 → 以当前 (Critical) 级别补发首次 Alert。
         let e = tr.observe(
             t(4000),
             mono(4000),

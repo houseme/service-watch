@@ -1,14 +1,14 @@
-//! 指标周期推送(ROADMAP「指标周期推送」):`[metrics]` 协议定义与实现。
+//! 指标周期推送 (ROADMAP「指标周期推送」):`[metrics]` 协议定义与实现。
 //!
-//! ## 协议(投递契约)
-//! - 每 `interval`(默认 60s)把最新 [`MetricsReport`](crate::model::control::MetricsReport)
+//! ## 协议 (投递契约)
+//! - 每 `interval`(默认 60s) 把最新 [`MetricsReport`](crate::model::control::MetricsReport)
 //!   以 JSON `POST` 到 `url`(Content-Type: application/json);
-//! - 成功 = HTTP 2xx;重定向视为失败(`redirect(Policy::none())`,与 webhook 一致
+//! - 成功 = HTTP 2xx;重定向视为失败 (`redirect(Policy::none())`,与 webhook 一致
 //!   —— 301/303 会把 POST 降级为 GET 投往错误端点);
-//! - 单次尝试,无重试(指标是可再生的瞬时快照,at-least-once 无意义;
-//!   下一周期自然是最新值 —— "失败即放弃,下轮覆盖"语义);
-//! - 失败行为:WARN 日志 + 连败 **首轮与恢复首轮** 写 journal Audit(粘性边沿,
-//!   不刷屏);连败 ≥3 后每 10 连败再记一条(长期故障可观测但不淹没日志)。
+//! - 单次尝试，无重试 (指标是可再生的瞬时快照，at-least-once 无意义;
+//!   下一周期自然是最新值 —— "失败即放弃，下轮覆盖"语义);
+//! - 失败行为:WARN 日志 + 连败 **首轮与恢复首轮** 写 journal Audit(粘性边沿，
+//!   不刷屏);连败 ≥3 后每 10 连败再记一条 (长期故障可观测但不淹没日志)。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +20,7 @@ use crate::model::control::MetricsReport;
 const STREAK_QUIET_THRESHOLD: u64 = 3;
 const STREAK_QUIET_EVERY: u64 = 10;
 
-/// 指标推送任务。`journal_tx` 为 `None` 时(测试/无 journal)仅日志。
+/// 指标推送任务。`journal_tx` 为 `None` 时 (测试/无 journal) 仅日志。
 pub async fn run_metrics_pusher(
     url: url::Url,
     interval: Duration,
@@ -55,18 +55,18 @@ pub async fn run_metrics_pusher(
                         return;
                     }
                 } else {
-                    return; // sender 已 drop:上游终结(防 Err 臂忙转)
+                    return; // sender 已 drop:上游终结 (防 Err 臂忙转)
                 }
             }
         }
         let report = metrics_rx.borrow().clone();
         let attempt = client.post(url.clone()).json(&*report).send();
-        // panic 隔离来自任务边界(JoinError::is_panic,下方 Err 臂)—— 无需
-        // AssertUnwindSafe 包装(第六轮评审微瑕清理)。
+        // panic 隔离来自任务边界 (JoinError::is_panic，下方 Err 臂)—— 无需
+        // AssertUnwindSafe 包装 (第六轮评审微瑕清理)。
         let outcome =
             tokio::spawn(async move { tokio::time::timeout(timeout, attempt).await }).await;
         match outcome {
-            // panic 隔离:推送 panic 不毒化任务(单次尝试在独立任务)
+            // panic 隔离：推送 panic 不毒化任务 (单次尝试在独立任务)
             Err(join_err) => {
                 fail_streak += 1;
                 tracing::error!(summary = %join_err, streak = fail_streak, "metrics push task panicked");
@@ -117,7 +117,7 @@ pub async fn run_metrics_pusher(
     }
 }
 
-/// 失败处理:WARN;连败边沿写 journal 审计(首轮 / 恢复首轮 / 长期故障采样)。
+/// 失败处理:WARN;连败边沿写 journal 审计 (首轮 / 恢复首轮 / 长期故障采样)。
 async fn on_failure(
     journal_audit_active: &mut bool,
     streak: u64,
@@ -156,7 +156,7 @@ async fn on_failure(
     }
 }
 
-/// journal 审计(尽力而为;无通道时仅 debug)。
+/// journal 审计 (尽力而为;无通道时仅 debug)。
 async fn journal_audit(journal_tx: &Option<crate::recover::journal::JournalSender>, message: &str) {
     let Some(tx) = journal_tx else {
         tracing::debug!(message, "metrics push audit (no journal channel)");
@@ -175,8 +175,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// 端到端:真实 axum stub 接收 POST,断言 body 可反序列化为 MetricsReport
-    /// 且按周期重复投递(真实短 interval;paused 时钟对真实网络无意义)。
+    /// 端到端：真实 axum stub 接收 POST，断言 body 可反序列化为 MetricsReport
+    /// 且按周期重复投递 (真实短 interval;paused 时钟对真实网络无意义)。
     #[tokio::test(flavor = "multi_thread")]
     async fn pushes_report_on_interval_and_parses_as_metrics_report() {
         let hits = Arc::new(AtomicUsize::new(0));
@@ -209,7 +209,7 @@ mod tests {
             shutdown.clone(),
             None,
         ));
-        // eval 侧持续发布(首拍在 interval 后)
+        // eval 侧持续发布 (首拍在 interval 后)
         metrics_tx.send_replace(Arc::new(MetricsReport {
             probe_executed: 7,
             ..Default::default()
@@ -226,10 +226,10 @@ mod tests {
         let _ = jrx; // 保持接收端存活
     }
 
-    /// 失败路径:连接拒绝 → 连败不 panic、任务存活;恢复后审计边沿(journal 收到)。
+    /// 失败路径：连接拒绝 → 连败不 panic、任务存活;恢复后审计边沿 (journal 收到)。
     #[tokio::test]
     async fn failure_streak_records_journal_audit_edges() {
-        // 不可达端口:连接拒绝
+        // 不可达端口：连接拒绝
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener); // 立即释放 → 连接拒绝

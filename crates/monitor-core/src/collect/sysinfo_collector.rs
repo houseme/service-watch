@@ -1,14 +1,14 @@
-//! sysinfo 0.40 采集器实现(DESIGN.md §6.1 API 锚点、§6.2 部分刷新协议、§6.3 温度可信过滤)。
+//! sysinfo 0.40 采集器实现 (DESIGN.md §6.1 API 锚点、§6.2 部分刷新协议、§6.3 温度可信过滤)。
 //!
-//! 实现要点:
+//! 实现要点：
 //! - `System::new()` 返回 Err → `CoreError::Collect`(外层 `create_collector` 降级 Stub);
-//! - CPU 首采在构造期完成:隔 [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`] 双采样
-//!   `refresh_cpu_usage`(睡眠只发生这一次);之后每轮 `collect` 直接读数,绝不睡眠;
+//! - CPU 首采在构造期完成：隔 [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`] 双采样
+//!   `refresh_cpu_usage`(睡眠只发生这一次);之后每轮 `collect` 直接读数，绝不睡眠;
 //! - 每轮部分刷新:cpu_usage + memory + disks + networks + components(温度)+
 //!   全量 watched PID 一次传入 `refresh_processes(Some(&pids), true)`;
-//!   全量 `refresh_all` 禁止(观测开销);
+//!   全量 `refresh_all` 禁止 (观测开销);
 //! - 死亡判定交给 eval(快照缺失即未刷新),本层只产出 `(pid, start_time)`
-//!   匹配的进程(身份不匹配 = PID 复用,同样视为未刷新);
+//!   匹配的进程 (身份不匹配 = PID 复用，同样视为未刷新);
 //! - 温度逐值可信过滤 -20..=150 ℃(闭边界),越界丢弃 +
 //!   [`Degradation::TemperatureImplausible`];`tdev`/`als-temp` 等已知噪声源整条跳过;
 //!   同类 Degradation 每轮最多一条。
@@ -26,14 +26,14 @@ use crate::model::snapshot::{
     Degradation, DiskUsage, HardwareSnapshot, NetIo, ProcessSnapshot, Temperature,
 };
 
-/// 温度可信区间闭边界(℃)。实测 macOS 存在 -9201 ℃ 级垃圾读数(DESIGN §6.3)。
+/// 温度可信区间闭边界 (℃)。实测 macOS 存在 -9201 ℃ 级垃圾读数 (DESIGN §6.3)。
 const TEMPERATURE_MIN_C: f32 = -20.0;
 const TEMPERATURE_MAX_C: f32 = 150.0;
 
-/// 已知噪声传感器 label 子串(DESIGN §6.3):整条跳过,不产出也不记 Degradation。
+/// 已知噪声传感器 label 子串 (DESIGN §6.3):整条跳过，不产出也不记 Degradation。
 const NOISE_LABEL_SUBSTRINGS: [&str; 2] = ["tdev", "als-temp"];
 
-/// 温度可信过滤纯函数(DESIGN §6.3):-20..=150 ℃ 之外(含 NaN/±Inf)视为垃圾读数。
+/// 温度可信过滤纯函数 (DESIGN §6.3):-20..=150 ℃ 之外 (含 NaN/±Inf)视为垃圾读数。
 fn plausible(celsius: f32) -> bool {
     (TEMPERATURE_MIN_C..=TEMPERATURE_MAX_C).contains(&celsius)
 }
@@ -45,7 +45,7 @@ fn is_noise_label(label: &str) -> bool {
         .any(|needle| label.contains(needle))
 }
 
-/// 子采集器(components/disks/networks)初始化:失败不致命,降级为 None 并记日志。
+/// 子采集器 (components/disks/networks) 初始化：失败不致命，降级为 None 并记日志。
 fn init_or_warn<T>(
     what: &'static str,
     init: impl FnOnce() -> std::result::Result<T, sysinfo::Error>,
@@ -63,14 +63,14 @@ fn init_or_warn<T>(
     }
 }
 
-/// sysinfo 0.40 同步采集器。独占 [`System`],由单一线程驱动([`Collector`] 契约)。
+/// sysinfo 0.40 同步采集器。独占 [`System`],由单一线程驱动 ([`Collector`] 契约)。
 pub struct SysCollector {
     system: System,
     /// 温度组件;初始化失败时为 None(每轮记 `TemperatureUnavailable`,不伪造)。
     components: Option<Components>,
-    /// 磁盘列表;初始化失败时为 None(产出空 Vec,不伪造)。
+    /// 磁盘列表;初始化失败时为 None(产出空 Vec，不伪造)。
     disks: Option<Disks>,
-    /// 网络接口;初始化失败时为 None(产出空 Vec,不伪造)。
+    /// 网络接口;初始化失败时为 None(产出空 Vec，不伪造)。
     networks: Option<Networks>,
     /// 构造期已完成 CPU 双采样则 true;false 时 `collect` 产出
     /// `cpu_usage_percent = None` + [`Degradation::CpuFirstSample`]。
@@ -82,13 +82,13 @@ impl SysCollector {
         let mut system = System::new()
             .map_err(|e| CoreError::Collect(format!("sysinfo system init failed: {e}")))?;
 
-        // CPU 首采(DESIGN §6.1):双采样必须隔 MINIMUM_CPU_UPDATE_INTERVAL 才有效。
+        // CPU 首采 (DESIGN §6.1):双采样必须隔 MINIMUM_CPU_UPDATE_INTERVAL 才有效。
         // 睡眠只允许发生在构造期这一次;collect 路径绝不睡眠。
         system.refresh_cpu_usage();
         std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
         system.refresh_cpu_usage();
 
-        // 温度/磁盘/网络初始化失败不致命:降级为 None,对应数据按轮记 Degradation/空列表。
+        // 温度/磁盘/网络初始化失败不致命：降级为 None，对应数据按轮记 Degradation/空列表。
         let components = init_or_warn("components", Components::new_with_refreshed_list);
         let disks = init_or_warn("disks", Disks::new_with_refreshed_list);
         let networks = init_or_warn("networks", Networks::new_with_refreshed_list);
@@ -107,7 +107,7 @@ impl SysCollector {
         })
     }
 
-    /// 温度采集 + 可信过滤(DESIGN §6.3)。同类 Degradation 每轮最多一条。
+    /// 温度采集 + 可信过滤 (DESIGN §6.3)。同类 Degradation 每轮最多一条。
     fn collect_temperatures(&mut self, degradations: &mut Vec<Degradation>) -> Vec<Temperature> {
         let Some(components) = self.components.as_mut() else {
             degradations.push(Degradation::TemperatureUnavailable {
@@ -125,7 +125,7 @@ impl SysCollector {
             saw_any_sensor = true;
             let label = component.label();
             if is_noise_label(label) {
-                continue; // 已知噪声源:tdev/als-temp 等,整条跳过
+                continue; // 已知噪声源:tdev/als-temp 等，整条跳过
             }
             match component.temperature() {
                 Some(raw) if plausible(raw) => {
@@ -135,7 +135,7 @@ impl SysCollector {
                     });
                 }
                 Some(raw) => {
-                    // 越界垃圾读数:丢弃,不产出 Temperature。
+                    // 越界垃圾读数：丢弃，不产出 Temperature。
                     if !saw_implausible {
                         saw_implausible = true;
                         degradations.push(Degradation::TemperatureImplausible {
@@ -153,7 +153,7 @@ impl SysCollector {
                 }
             }
         }
-        // 平台无温度数据(组件列表为空)或存在不可用传感器 → 一条 TemperatureUnavailable。
+        // 平台无温度数据 (组件列表为空) 或存在不可用传感器 → 一条 TemperatureUnavailable。
         if saw_unavailable || !saw_any_sensor {
             degradations.push(Degradation::TemperatureUnavailable {
                 platform: std::env::consts::OS,
@@ -167,7 +167,7 @@ impl Collector for SysCollector {
     fn collect(&mut self, watched: &[ProcessIdentity]) -> CollectOutput {
         let mut degradations: Vec<Degradation> = Vec::new();
 
-        // CPU:首个有效采样前不伪造数值(None + Degradation,DESIGN §5)。
+        // CPU:首个有效采样前不伪造数值 (None + Degradation,DESIGN §5)。
         let (cpu_usage_percent, per_core_usage) = if self.cpu_ready {
             self.system.refresh_cpu_usage();
             (
@@ -186,7 +186,7 @@ impl Collector for SysCollector {
         let memory_total_bytes = self.system.total_memory();
         let memory_used_bytes = self.system.used_memory();
 
-        // 磁盘(初始化失败保持空列表,不伪造)。
+        // 磁盘 (初始化失败保持空列表，不伪造)。
         if let Some(disks) = self.disks.as_mut() {
             disks.refresh(true);
         }
@@ -222,10 +222,10 @@ impl Collector for SysCollector {
             })
             .unwrap_or_default();
 
-        // 温度(§6.3 可信过滤)。
+        // 温度 (§6.3 可信过滤)。
         let temperatures = self.collect_temperatures(&mut degradations);
 
-        // 进程部分刷新(DESIGN §6.2):本轮全部 watched PID 一次性传入,漏传者停留旧数据。
+        // 进程部分刷新 (DESIGN §6.2):本轮全部 watched PID 一次性传入，漏传者停留旧数据。
         let mut pids: Vec<Pid> = Vec::with_capacity(watched.len());
         for identity in watched {
             let pid = Pid::from_u32(identity.pid.0);
@@ -238,10 +238,10 @@ impl Collector for SysCollector {
             .refresh_processes(ProcessesToUpdate::Some(&pids), true);
         tracing::debug!(refreshed, requested = pids.len(), "partial process refresh");
 
-        // 对本轮刷新到的 watched PID 产出快照,**上报观测身份**(内核记账的
-        // start_time)。PID 复用判定在消费端(eval):预期身份与观测身份不符
-        // → 原进程已死/被复用,由 eval 采纳或判死(DESIGN §8.3;±2s 容差吸收
-        // spawn 侧本地钟与内核记账的跨秒失配)。本层是事实观察者,不做裁决。
+        // 对本轮刷新到的 watched PID 产出快照，**上报观测身份**(内核记账的
+        // start_time)。PID 复用判定在消费端 (eval):预期身份与观测身份不符
+        // → 原进程已死/被复用，由 eval 采纳或判死 (DESIGN §8.3;±2s 容差吸收
+        // spawn 侧本地钟与内核记账的跨秒失配)。本层是事实观察者，不做裁决。
         let processes: Vec<ProcessSnapshot> = {
             let mut seen: Vec<u32> = Vec::with_capacity(watched.len());
             watched
@@ -249,7 +249,7 @@ impl Collector for SysCollector {
                 .filter_map(|identity| {
                     let pid = identity.pid.0;
                     if seen.contains(&pid) {
-                        return None; // 去重:同一 pid 多个身份条目只产出一个快照
+                        return None; // 去重：同一 pid 多个身份条目只产出一个快照
                     }
                     let process = self.system.processes().get(&Pid::from_u32(pid))?;
                     seen.push(pid);
@@ -302,7 +302,7 @@ impl std::fmt::Display for SysCollector {
 mod tests {
     use super::*;
 
-    /// (1) 真实构造成功(含构造期一次性 CPU 双采样睡眠;不依赖 CI 环境)。
+    /// (1) 真实构造成功 (含构造期一次性 CPU 双采样睡眠;不依赖 CI 环境)。
     #[test]
     fn new_succeeds_on_host() {
         let collector = SysCollector::new().expect("SysCollector::new should succeed on host");
@@ -313,7 +313,7 @@ mod tests {
     }
 
     /// (2) 空 watched 采集:macOS 上 memory_total_bytes > 0,CPU 有有效值;
-    /// 不对温度列表做平台断言(Windows 等无温度平台允许为空)。
+    /// 不对温度列表做平台断言 (Windows 等无温度平台允许为空)。
     #[test]
     fn collect_empty_watched_returns_real_memory_snapshot() {
         let mut collector = SysCollector::new().expect("collector init");
@@ -331,12 +331,12 @@ mod tests {
         let cpu = out
             .hardware
             .cpu_usage_percent
-            .expect("构造期已双采样,cpu_usage_percent 必须为 Some");
+            .expect("构造期已双采样，cpu_usage_percent 必须为 Some");
         assert!(
             (0.0..=100.0).contains(&cpu),
             "cpu usage out of plausible range: {cpu}"
         );
-        // 温度可信区间内的产出值必须全部可信(过滤生效)。
+        // 温度可信区间内的产出值必须全部可信 (过滤生效)。
         for t in &out.hardware.temperatures {
             if let Some(c) = t.celsius {
                 assert!(
@@ -349,7 +349,7 @@ mod tests {
         }
     }
 
-    /// (3) 温度可信过滤纯函数:闭边界含端点,-9201 ℃ 级垃圾值被拒。
+    /// (3) 温度可信过滤纯函数：闭边界含端点，-9201 ℃ 级垃圾值被拒。
     #[test]
     fn temperature_plausibility_filter() {
         assert!(!plausible(-9201.0), "macOS 实测垃圾值必须被拒");
@@ -362,7 +362,7 @@ mod tests {
         assert!(!plausible(f32::INFINITY), "+Inf 不可信");
     }
 
-    /// 噪声源 label 跳过判定(DESIGN §6.3:tdev/als-temp)。
+    /// 噪声源 label 跳过判定 (DESIGN §6.3:tdev/als-temp)。
     #[test]
     fn noise_label_detection() {
         assert!(is_noise_label("PM tdev"));
@@ -371,13 +371,13 @@ mod tests {
         assert!(!is_noise_label("CPU Core 1"));
     }
 
-    /// (4) §6.2 部分刷新协议:watched PID 刷新后产出快照,身份为**观测值**
-    /// (内核记账 start_time);预期与观测不符的裁决在消费端(eval 容差 + 采纳)。
+    /// (4) §6.2 部分刷新协议:watched PID 刷新后产出快照，身份为**观测值**
+    /// (内核记账 start_time);预期与观测不符的裁决在消费端 (eval 容差 + 采纳)。
     #[test]
     fn collect_refreshes_watched_process_by_identity() {
         let mut collector = SysCollector::new().expect("collector init");
         let my_pid = std::process::id();
-        // 先探测自身启动时间,构造合法身份(测试进程必然存活,确定性成立)。
+        // 先探测自身启动时间，构造合法身份 (测试进程必然存活，确定性成立)。
         let self_pid = Pid::from_u32(my_pid);
         collector
             .system
@@ -396,7 +396,7 @@ mod tests {
         assert_eq!(snap.identity.pid.0, my_pid);
         assert_eq!(
             snap.identity.start_time, start_time,
-            "上报观测身份(内核记账)"
+            "上报观测身份 (内核记账)"
         );
         assert!(
             snap.cpu_usage_percent.is_some(),
@@ -411,14 +411,14 @@ mod tests {
             "status 必须有值"
         );
 
-        // 观测身份语义:预期身份的 start_time 与内核不符时,**仍产出观测快照**
+        // 观测身份语义：预期身份的 start_time 与内核不符时，**仍产出观测快照**
         // (消费端 eval 据此做容差匹配/复用裁决/采纳);快照 identity 为内核观测值。
         let stale = vec![ProcessIdentity::new(my_pid, start_time + 3600)];
         let out2 = collector.collect(&stale);
         assert_eq!(out2.processes.len(), 1, "观测身份必须如实上报");
         assert_eq!(
             out2.processes[0].identity.start_time, start_time,
-            "快照身份是内核观测值,不是传入的预期值"
+            "快照身份是内核观测值，不是传入的预期值"
         );
     }
 }

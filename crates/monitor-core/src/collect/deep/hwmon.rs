@@ -1,6 +1,6 @@
-//! Linux hwmon 标准 sysfs ABI,只读 fanN_input(RPM)/inN_input(mV)。
+//! Linux hwmon 标准 sysfs ABI，只读 fanN_input(RPM)/inN_input(mV)。
 //! 单位与 fault 语义依据 https://docs.kernel.org/hwmon/sysfs-interface.html
-//! (核对日期 2026-11-12)。电压保留驱动的引脚读数,不推断主板分压比例。
+//! (核对日期 2026-11-12)。电压保留驱动的引脚读数，不推断主板分压比例。
 
 use std::fs;
 use std::io;

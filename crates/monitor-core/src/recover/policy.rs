@@ -1,14 +1,14 @@
-//! 恢复策略原语:退避、滑动窗口重启预算(DESIGN.md §8.2)。
+//! 恢复策略原语：退避、滑动窗口重启预算 (DESIGN.md §8.2)。
 //!
 //! 预算语义:**所有自动重启均计数**(含 spawn 失败重试);窗口为滑动窗口;
-//! 耗尽 → Fatal 闩锁,窗口滑过**不**自动恢复,仅控制平面 reset 解除。
+//! 耗尽 → Fatal 闩锁，窗口滑过**不**自动恢复，仅控制平面 reset 解除。
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::RestartCfg;
 
-/// 从配置固化策略(校验已在 config 层完成)。
+/// 从配置固化策略 (校验已在 config 层完成)。
 #[derive(Debug, Clone)]
 pub struct RestartPolicy {
     pub min_uptime: Duration,
@@ -59,7 +59,7 @@ impl Backoff {
         Self::new(p.backoff_initial, p.backoff_max)
     }
 
-    /// 热更新延迟边界,保留已经累计的失败次数。
+    /// 热更新延迟边界，保留已经累计的失败次数。
     pub fn update_limits(&mut self, initial: Duration, max: Duration) {
         self.initial = initial;
         self.max = max;
@@ -82,7 +82,7 @@ impl Backoff {
     }
 }
 
-/// 滑动窗口重启预算(ring buffer)。
+/// 滑动窗口重启预算 (ring buffer)。
 #[derive(Debug)]
 pub struct BudgetWindow {
     max_restarts: u32,
@@ -103,7 +103,7 @@ impl BudgetWindow {
         Self::new(p.max_restarts, p.restart_window)
     }
 
-    /// 热更新预算边界,保留现有时间戳,不解除 Fatal 或清空预算。
+    /// 热更新预算边界，保留现有时间戳，不解除 Fatal 或清空预算。
     pub fn update_limits(&mut self, max_restarts: u32, window: Duration) {
         self.max_restarts = max_restarts.max(1);
         self.window = window;
@@ -139,19 +139,19 @@ impl BudgetWindow {
         self.count(now) >= self.max_restarts
     }
 
-    /// 清空(reset 命令)。
+    /// 清空 (reset 命令)。
     pub fn clear(&mut self) {
         self.stamps.clear();
     }
 
-    /// 从 journal 恢复(墙钟时间戳 → 单调 Instant)。
+    /// 从 journal 恢复 (墙钟时间戳 → 单调 Instant)。
     /// 跨重启的时间基用线性映射近似:`mono ≈ now_mono + (t - now_wall)`;
     /// - **早于滑动窗口的记录直接丢弃**(第五轮评审 P1):journal 累积全部历史
-    ///   Restart,跨 reboot/长挂起后单调钟不含离线时长,线性映射会把旧戳夹到
-    ///   now 附近 → 窗口虚增、首次真实死亡即误 Fatal。窗口过滤以墙钟差为准,
+    ///   Restart，跨 reboot/长挂起后单调钟不含离线时长,线性映射会把旧戳夹到
+    ///   now 附近 → 窗口虚增、首次真实死亡即误 Fatal。窗口过滤以墙钟差为准，
     ///   与重启场景无关、确定可用。
-    /// - 窗口内的戳 `checked_sub` 溢出(极长 uptime 的罕见分支)与未来时间戳
-    ///   (墙钟回拨)才夹到 now。
+    /// - 窗口内的戳 `checked_sub` 溢出 (极长 uptime 的罕见分支) 与未来时间戳
+    ///   (墙钟回拨) 才夹到 now。
     pub fn restore(&mut self, stamps: &[SystemTime], now_wall: SystemTime, now_mono: Instant) {
         self.stamps.clear();
         for t in stamps {
@@ -160,17 +160,17 @@ impl BudgetWindow {
                 Ok(ago) => self
                     .stamps
                     .push_back(now_mono.checked_sub(ago).unwrap_or(now_mono)),
-                Err(_) => self.stamps.push_back(now_mono), // 未来时间戳(墙钟回拨):夹到 now
+                Err(_) => self.stamps.push_back(now_mono), // 未来时间戳 (墙钟回拨):夹到 now
             }
         }
     }
 
-    /// 导出为墙钟时间戳(持久化用)。
+    /// 导出为墙钟时间戳 (持久化用)。
     pub fn to_wall(&self, now_mono: Instant, now_wall: SystemTime) -> Vec<SystemTime> {
         self.stamps
             .iter()
             .map(|&t| {
-                // Instant::duration_since 自 1.60 起饱和为零(不 panic)
+                // Instant::duration_since 自 1.60 起饱和为零 (不 panic)
                 let ago = now_mono.duration_since(t);
                 now_wall.checked_sub(ago).unwrap_or(now_wall)
             })
@@ -229,7 +229,7 @@ mod tests {
         let mut budget = BudgetWindow::new(5, Duration::from_secs(60));
         let t0 = Instant::now();
         let w0 = SystemTime::now();
-        let old = w0.checked_sub(Duration::from_secs(3600)).unwrap(); // 1h 前,远超 60s 窗口
+        let old = w0.checked_sub(Duration::from_secs(3600)).unwrap(); // 1h 前，远超 60s 窗口
         let fresh = w0.checked_sub(Duration::from_secs(10)).unwrap();
         budget.restore(&[old, old, fresh], w0, t0);
         assert_eq!(budget.count(t0), 1, "窗口外旧戳丢弃;窗口内新鲜戳保留");

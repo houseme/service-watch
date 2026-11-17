@@ -1,9 +1,9 @@
-//! SCM 目标(windows_service)运行时契约测试(ROADMAP「原生 Windows Service 目标恢复」)。
+//! SCM 目标 (windows_service) 运行时契约测试 (ROADMAP「原生 Windows Service 目标恢复」)。
 //!
-//! 不触真实 SCM:注入进程内假后端(`ScmOps` 公开 trait 的测试实现),验证
+//! 不触真实 SCM:注入进程内假后端 (`ScmOps` 公开 trait 的测试实现),验证
 //! `ProcessManager` 对 SCM 目标的全生命周期分派 —— spawn 幂等、QueryStatus
 //! liveness、Stop 确认、force_kill 如实降级、停机只停本会话启动的服务。
-//! 平台无关(macOS/Windows 同一套断言);真实 SCM 高层 API 的编译证据由
+//! 平台无关 (macOS/Windows 同一套断言);真实 SCM 高层 API 的编译证据由
 //! `cargo check --target x86_64-pc-windows-msvc --features scm-target` 提供。
 
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,7 @@ use monitor_core::recover::process::ProcessManager;
 use monitor_core::recover::process::windows::{ScmOps, ScmServiceState, ScmStartOutcome};
 use monitor_core::recover::{RecoverAction, RecoveryFsm, RestartPolicy};
 
-/// 测试假后端:内存状态机 + 调用计数(与 src 内单测的 Fake 同语义,此处为
+/// 测试假后端：内存状态机 + 调用计数 (与 src 内单测的 Fake 同语义，此处为
 /// 集成测试独立实现 —— 单测 Fake 是 pub(crate),不跨 crate)。
 #[derive(Debug, Default)]
 struct FakeScm {
@@ -123,7 +123,7 @@ async fn scm_lifecycle_end_to_end_with_fsm() {
     let t0 = std::time::Instant::now();
     let tick = |secs: u64| t0 + Duration::from_secs(secs);
 
-    // 冷启动:服务停止 → spawn 门通过 → Start
+    // 冷启动：服务停止 → spawn 门通过 → Start
     assert!(!pm.is_running("wsvc"));
     let id = pm.spawn("wsvc").await.unwrap();
     assert_eq!(fake.starts(), 1);
@@ -143,14 +143,14 @@ async fn scm_lifecycle_end_to_end_with_fsm() {
     let _ = fsm.on_liveness_ok(tick(11));
     assert_eq!(fsm.state(), RecoveryState::Running);
 
-    // 服务停止:is_running false;poll_exit 上报一次退出(code=None)
+    // 服务停止:is_running false;poll_exit 上报一次退出 (code=None)
     fake.set_running(false);
     assert!(!pm.is_running("wsvc"));
     let exit = pm.poll_exit("wsvc").await.expect("Stopped 必须上报退出");
     assert_eq!(exit.code, None);
     assert!(pm.poll_exit("wsvc").await.is_none(), "只上报一次");
 
-    // FSM 恢复:gone 确认 → Recovering → 排程 → 重启(SCM 再 Start)→ Starting
+    // FSM 恢复:gone 确认 → Recovering → 排程 → 重启 (SCM 再 Start)→ Starting
     let _ = fsm.on_liveness_gone(tick(20));
     let actions = fsm.on_liveness_gone(tick(25));
     assert_eq!(fsm.state(), RecoveryState::Recovering);
@@ -167,7 +167,7 @@ async fn scm_lifecycle_end_to_end_with_fsm() {
     assert!(
         fsm.on_child_exit(tick(30), ProcessIdentity::new(0, 0))
             .is_empty(),
-        "on_scm_spawn_ok 不落身份:退出事件必须被身份校验拒绝(gone 路径才是 SCM 死亡入口)"
+        "on_scm_spawn_ok 不落身份：退出事件必须被身份校验拒绝 (gone 路径才是 SCM 死亡入口)"
     );
     assert!(
         actions
@@ -176,7 +176,7 @@ async fn scm_lifecycle_end_to_end_with_fsm() {
     );
 }
 
-/// 冷启动时服务已运行:spawn 幂等成功(不重复发 Start),监控照常。
+/// 冷启动时服务已运行:spawn 幂等成功 (不重复发 Start),监控照常。
 #[tokio::test]
 async fn scm_spawn_is_idempotent_for_already_running_service() {
     let fake = Arc::new(FakeScm::new(true));
@@ -188,8 +188,8 @@ async fn scm_spawn_is_idempotent_for_already_running_service() {
     assert!(pm.identity("wsvc").is_none());
 }
 
-/// 三值证据出口(第六轮评审 P1 配套):scm_state 透传 Transitioning / Stopped /
-/// Running / 查询失败,eval 据此区分"启动在途的正常过渡"与"确认死亡"——
+/// 三值证据出口 (第六轮评审 P1 配套):scm_state 透传 Transitioning / Stopped /
+/// Running / 查询失败，eval 据此区分"启动在途的正常过渡"与"确认死亡"——
 /// 过渡态不得被抹平为 false 后喂 on_liveness_gone(否则慢启动服务被 Stop 掐死)。
 #[tokio::test]
 async fn scm_state_exposes_transitioning_and_failure_distinctly() {
@@ -213,7 +213,7 @@ async fn scm_state_exposes_transitioning_and_failure_distinctly() {
     });
     assert!(plain.scm_state("native").is_none(), "非 SCM 目标恒 None");
 
-    // spawn 后过渡态(START_PENDING):Transitioning 可见,poll_exit 不误报退出
+    // spawn 后过渡态 (START_PENDING):Transitioning 可见，poll_exit 不误报退出
     pm.spawn("wsvc").await.unwrap();
     fake.inner.lock().unwrap().transitioning = true;
     assert_eq!(
@@ -222,7 +222,7 @@ async fn scm_state_exposes_transitioning_and_failure_distinctly() {
         "启动在途必须与确认死亡可区分"
     );
     assert!(pm.poll_exit("wsvc").await.is_none(), "过渡态不是退出");
-    assert!(!pm.is_running("wsvc"), "过渡态未确认运行(契约不变)");
+    assert!(!pm.is_running("wsvc"), "过渡态未确认运行 (契约不变)");
 
     // 过渡结束 → Running;再停止 → Stopped(死亡证据)
     fake.set_running(true);
@@ -244,33 +244,33 @@ async fn scm_stop_force_kill_and_query_failure_semantics() {
     pm.register(scm_cfg("wsvc", "W3SVC"));
     pm.spawn("wsvc").await.unwrap();
 
-    // 查询失败:is_running 不可证明存活(false),poll_exit 不判死
+    // 查询失败:is_running 不可证明存活 (false),poll_exit 不判死
     fake.inner.lock().unwrap().fail_query = true;
     assert!(!pm.is_running("wsvc"));
     assert!(pm.poll_exit("wsvc").await.is_none());
     fake.inner.lock().unwrap().fail_query = false;
 
-    // graceful stop:发 Stop 即返回(不阻塞);停止完成由 QueryStatus 确认。
-    // 真实服务停止需要时间(过渡态不误报的语义由 end_to_end 用例覆盖);
+    // graceful stop:发 Stop 即返回 (不阻塞);停止完成由 QueryStatus 确认。
+    // 真实服务停止需要时间 (过渡态不误报的语义由 end_to_end 用例覆盖);
     // 假实现即时停止 → poll_exit 直接确认退出一次。
     pm.signal_stop("wsvc", Duration::from_secs(15)).unwrap();
     assert_eq!(fake.stops(), 1);
     assert!(
         pm.stop_requested_at("wsvc").is_some(),
-        "stop 已登记(grace 升级判定用)"
+        "stop 已登记 (grace 升级判定用)"
     );
     let exit = pm.poll_exit("wsvc").await.expect("停止完成 → 退出确认");
     assert_eq!(exit.code, None);
     assert!(pm.spawned_at_wall("wsvc").is_none(), "退出上报后会话结束");
 
-    // force_kill:SCM 无 Terminate → 再次 Stop(幂等;会话已结束仍成功,
+    // force_kill:SCM 无 Terminate → 再次 Stop(幂等;会话已结束仍成功，
     // FSM grace 升级路径依赖此语义),但无会话则不再有退出可上报
     pm.force_kill("wsvc").unwrap();
     assert_eq!(fake.stops(), 2);
     assert!(pm.poll_exit("wsvc").await.is_none());
 }
 
-/// 启动失败诚实上报(非 Windows/无 feature 时生产后端同样返回 Err):
+/// 启动失败诚实上报 (非 Windows/无 feature 时生产后端同样返回 Err):
 /// eval 以 on_spawn_result(None) 喂 FSM → CrashLoop 计入预算。
 #[tokio::test]
 async fn scm_start_failure_maps_to_spawn_error() {
@@ -291,7 +291,7 @@ async fn scm_start_failure_maps_to_spawn_error() {
     );
 }
 
-/// 停机边界:shutdown_all 只停本会话 spawn 过的服务(观察者外置)。
+/// 停机边界:shutdown_all 只停本会话 spawn 过的服务 (观察者外置)。
 #[tokio::test]
 async fn scm_shutdown_stops_only_session_started_services() {
     let fake = Arc::new(FakeScm::new(false));
@@ -319,8 +319,8 @@ fn test_policy() -> RestartPolicy {
     RestartPolicy::from(&cfg)
 }
 
-/// 配置校验:windows_service 与 command 二选一、与进程启动字段互斥(运行时
-/// 证据;与 src/config.rs 内单测同源,此处经公开 API 复验)。
+/// 配置校验:windows_service 与 command 二选一、与进程启动字段互斥 (运行时
+/// 证据;与 src/config.rs 内单测同源，此处经公开 API 复验)。
 #[test]
 fn config_validation_scm_mutual_exclusion() {
     // 合法:SCM 目标 + restart/depends_on 照常
@@ -355,7 +355,7 @@ fn config_validation_scm_mutual_exclusion() {
     // activate 互斥
     let activate = "[[service]]\nname = 'app'\nwindows_service = 'W3SVC'\n[service.activate]\ncommand = 'hook'";
     assert!(monitor_core::config::Config::from_toml_str(activate).is_err());
-    // 二选一:都配 / 都缺 / 空白
+    // 二选一：都配 / 都缺 / 空白
     let both = "[[service]]\nname = 'app'\ncommand = '/bin/app'\nwindows_service = 'W3SVC'";
     assert!(monitor_core::config::Config::from_toml_str(both).is_err());
     let neither = "[[service]]\nname = 'app'";

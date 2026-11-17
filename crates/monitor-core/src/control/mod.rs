@@ -1,37 +1,37 @@
-//! 控制平面 HTTP 服务(feature `control-http`,DESIGN.md §9.2,axum)。
+//! 控制平面 HTTP 服务 (feature `control-http`,DESIGN.md §9.2,axum)。
 //!
-//! 端点:
-//! - `GET /`        内嵌只读状态页(F22:`include_str!` 零外部依赖,内联
+//! 端点：
+//! - `GET /`        内嵌只读状态页 (F22:`include_str!` 零外部依赖，内联
 //!   CSS/JS;JS 每 2s fetch `/status` 与 `/metrics` 渲染;不提供 reload 入口)
-//! - `GET /health`  浅存活(进程在即可,200 空体)
-//! - `GET /ready`   配置加载成功 + 调度循环已启动(**降级采集不影响 ready**):
-//!   ready → 200,否则 503;响应体 `{"ready":bool}`
+//! - `GET /health`  浅存活 (进程在即可，200 空体)
+//! - `GET /ready`   配置加载成功 + 调度循环已启动 (**降级采集不影响 ready**):
+//!   ready → 200，否则 503;响应体 `{"ready":bool}`
 //! - `GET /status`  StatusReport(经 watch 读 eval 最新汇报)
 //! - `GET /metrics` 运行指标:**内容协商** —— `?format=prometheus` 或
-//!   `Accept: text/plain` 返回 Prometheus 文本(DESIGN F13);默认 JSON。
-//!   告警计数器来自 alert counters,探测/恢复/运行概览来自 eval 每轮发布
+//!   `Accept: text/plain` 返回 Prometheus 文本 (DESIGN F13);默认 JSON。
+//!   告警计数器来自 alert counters，探测/恢复/运行概览来自 eval 每轮发布
 //! - `GET /metrics/history?range=<secs>`(F18 历史指标环形缓冲):窗口内样本
 //!   JSON `{"samples":[{at, report}...], "count": N}`;range 缺省 300、上限
 //!   [`METRICS_HISTORY_CAP`](超出收敛到上限);0/负/非数字 → 400;窗口内样本
-//!   超过 600 点等距降采样(保留首尾)。与 `/metrics`(瞬时)并存,Prometheus
+//!   超过 600 点等距降采样 (保留首尾)。与 `/metrics`(瞬时) 并存，Prometheus
 //!   文本端点不受影响
 //! - `POST /v1/restart/{target}` / `POST /v1/check/{target}` / `POST /v1/reset/{target}`
 //!   → `ControlCommand` 经 mpsc(16) 进 eval:入队成功 202;
-//!   通道满(Full)→ 503;通道关闭(停机中)→ 503(DESIGN §2.2 背压策略)
+//!   通道满 (Full)→ 503;通道关闭 (停机中)→ 503(DESIGN §2.2 背压策略)
 //! - `POST /v1/reload`(F14 配置热重载):body 可选 JSON `{"path": "..."}`(缺省
 //!   重读启动路径)→ `ControlCommand::Reload` 入队 202;非法 body → 400;
-//!   满/关闭 → 503。仅应用目标拓扑(checks/services/watches);其余小节变更
-//!   要求重启,不热应用(eval::reload 模块 doc)
+//!   满/关闭 → 503。仅应用目标拓扑 (checks/services/watches);其余小节变更
+//!   要求重启，不热应用 (eval::reload 模块 doc)
 //!
-//! ## 停机与 409 语义(v0.1,如实记录)
+//! ## 停机与 409 语义 (v0.1，如实记录)
 //!
 //! [`serve`] 是**无限 future**:内部 `axum::serve` 循环仅在 bind 失败或底层
-//! IO 错误时返回;停机由 runtime `abort` 本任务完成(DESIGN §2.2:runtime
+//! IO 错误时返回;停机由 runtime `abort` 本任务完成 (DESIGN §2.2:runtime
 //! 负责装配与停机顺序),本函数不做优雅停机。
 //!
 //! 「Fatal 态 restart → 409」(2026-11-11 接线):经 status watch 读取该 target
-//! 的恢复状态,Fatal → 409 + 提示 reset;非 Fatal 一律 202 入队(fire-and-forget
-//! 语义不变,eval 侧保留防御性拒绝 + journal 审计)。
+//! 的恢复状态，Fatal → 409 + 提示 reset;非 Fatal 一律 202 入队 (fire-and-forget
+//! 语义不变，eval 侧保留防御性拒绝 + journal 审计)。
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -42,13 +42,13 @@ use crate::collect::CollectOutput;
 use crate::error::Result;
 use crate::model::control::{ControlCommand, MetricsReport, StatusReport};
 
-// F18 历史指标端点专用导入(仅 control-http feature 参与编译)。
+// F18 历史指标端点专用导入 (仅 control-http feature 参与编译)。
 #[cfg(feature = "control-http")]
 use crate::model::control::{METRICS_HISTORY_CAP, MetricsHistory, MetricsSample};
 #[cfg(feature = "control-http")]
 use std::time::Duration;
 
-/// axum 相关导入(仅 control-http feature 参与编译)。
+/// axum 相关导入 (仅 control-http feature 参与编译)。
 #[cfg(feature = "control-http")]
 use axum::extract::{Path, State};
 #[cfg(feature = "control-http")]
@@ -58,20 +58,20 @@ use axum::routing::{get, post};
 #[cfg(feature = "control-http")]
 use axum::{Json, Router};
 
-/// 控制平面共享状态(runtime 装配,只读快照 + 命令出口)。
+/// 控制平面共享状态 (runtime 装配，只读快照 + 命令出口)。
 pub struct ControlShared {
     pub started_at: SystemTime,
     pub ready: Arc<std::sync::atomic::AtomicBool>,
     pub status_rx: watch::Receiver<Arc<StatusReport>>,
     pub metrics_rx: watch::Receiver<Arc<MetricsReport>>,
     pub snapshot_rx: watch::Receiver<Arc<CollectOutput>>,
-    /// eval 命令入口(容量小,满即 503 —— DESIGN §2.2 背压策略)。
+    /// eval 命令入口 (容量小，满即 503 —— DESIGN §2.2 背压策略)。
     pub cmd_tx: mpsc::Sender<ControlCommand>,
     /// 供 `/metrics` 补充告警计数。
     pub alert_counters: Arc<crate::alert::AlertCounters>,
 }
 
-/// 启动控制平面服务(**无限 future**):绑定 `listen` 后进入 axum 服务循环,
+/// 启动控制平面服务 (**无限 future**):绑定 `listen` 后进入 axum 服务循环，
 /// 仅在 bind 失败或底层 IO 错误时返回。停机由 runtime abort 本任务完成
 /// (见模块 doc「停机与 409 语义」)。
 #[cfg(feature = "control-http")]
@@ -80,7 +80,7 @@ pub async fn serve(listen: SocketAddr, shared: Arc<ControlShared>) -> Result<()>
     bind_and_serve(listener, shared).await
 }
 
-/// 绑定已完成的 serve 入口:runtime 先自行 bind 以提前暴露端口占用错误,
+/// 绑定已完成的 serve 入口:runtime 先自行 bind 以提前暴露端口占用错误，
 /// 再 spawn 本函数;单测对 127.0.0.1:0 临时端口直接调用。
 #[cfg(feature = "control-http")]
 pub(crate) async fn bind_and_serve(
@@ -93,7 +93,7 @@ pub(crate) async fn bind_and_serve(
         .map_err(crate::error::CoreError::from)
 }
 
-/// feature 关闭时的占位:控制平面不可用,调用即返回错误(不 panic)。
+/// feature 关闭时的占位：控制平面不可用，调用即返回错误 (不 panic)。
 #[cfg(not(feature = "control-http"))]
 pub async fn serve(_listen: SocketAddr, _shared: Arc<ControlShared>) -> Result<()> {
     Err(crate::error::CoreError::Control(
@@ -118,25 +118,25 @@ fn router(shared: Arc<ControlShared>) -> Router {
         .with_state(shared)
 }
 
-/// `GET /health`:浅存活 —— 进程在即 200 空体(不做任何依赖检查)。
+/// `GET /health`:浅存活 —— 进程在即 200 空体 (不做任何依赖检查)。
 #[cfg(feature = "control-http")]
 async fn health() -> StatusCode {
     StatusCode::OK
 }
 
-/// 内嵌只读状态页(F22):`include_str!` 编译期嵌入,零外部依赖(内联
+/// 内嵌只读状态页 (F22):`include_str!` 编译期嵌入，零外部依赖 (内联
 /// CSS/JS,无 CDN/字体/图标);页面自身只读 —— 不提供 reload 等写操作入口。
 #[cfg(feature = "control-http")]
 const STATUS_PAGE_HTML: &str = include_str!("status_page.html");
 
 /// `GET /`(F22 Web 状态页):`Html` 以 `text/html; charset=utf-8` 返回。
-/// 页内 JS 每 2s fetch `/status` 与 `/metrics` 渲染(见 status_page.html)。
+/// 页内 JS 每 2s fetch `/status` 与 `/metrics` 渲染 (见 status_page.html)。
 #[cfg(feature = "control-http")]
 async fn status_page() -> axum::response::Html<&'static str> {
     axum::response::Html(STATUS_PAGE_HTML)
 }
 
-/// `GET /ready`:ready → 200,否则 503;响应体 `{"ready":bool}`。
+/// `GET /ready`:ready → 200，否则 503;响应体 `{"ready":bool}`。
 #[cfg(feature = "control-http")]
 async fn ready(State(shared): State<Arc<ControlShared>>) -> (StatusCode, Json<serde_json::Value>) {
     if shared.ready.load(std::sync::atomic::Ordering::Relaxed) {
@@ -149,17 +149,17 @@ async fn ready(State(shared): State<Arc<ControlShared>>) -> (StatusCode, Json<se
     }
 }
 
-/// `GET /status`:eval 最新汇报。初始值由 runtime 写入(空 targets);
-/// sender 消失(eval 终止)后仍可读最后一份快照 —— 不 panic、不 5xx。
+/// `GET /status`:eval 最新汇报。初始值由 runtime 写入 (空 targets);
+/// sender 消失 (eval 终止) 后仍可读最后一份快照 —— 不 panic、不 5xx。
 #[cfg(feature = "control-http")]
 async fn status(State(shared): State<Arc<ControlShared>>) -> Json<StatusReport> {
-    // 工作区 serde 未启用 `rc` feature:`Arc<StatusReport>` 不可序列化,
-    // 克隆解 Arc(单次 HTTP 响应,开销可忽略)。
+    // 工作区 serde 未启用 `rc` feature:`Arc<StatusReport>` 不可序列化，
+    // 克隆解 Arc(单次 HTTP 响应，开销可忽略)。
     let report = shared.status_rx.borrow().clone();
     Json((*report).clone())
 }
 
-/// 合并三路指标来源(alert 计数器 / eval watch / uptime 推导)。
+/// 合并三路指标来源 (alert 计数器 / eval watch / uptime 推导)。
 #[cfg(feature = "control-http")]
 fn merged_metrics(shared: &ControlShared) -> MetricsReport {
     let mut report = shared.alert_counters.to_metrics();
@@ -190,9 +190,9 @@ fn merged_metrics(shared: &ControlShared) -> MetricsReport {
     report.recovery_starting = latest.recovery_starting;
     report.recovery_crashloop = latest.recovery_crashloop;
     report.recovery_fatal = latest.recovery_fatal;
-    // F18:环形缓冲句柄随 eval 侧报告透传(serde skip,不进 /metrics JSON)。
+    // F18:环形缓冲句柄随 eval 侧报告透传 (serde skip，不进 /metrics JSON)。
     report.history = latest.history.clone();
-    // uptime:eval 的单调源优先(墙钟回拨防护);watch 未发布(启动瞬间)才用墙钟。
+    // uptime:eval 的单调源优先 (墙钟回拨防护);watch 未发布 (启动瞬间) 才用墙钟。
     let wall_uptime = shared
         .started_at
         .elapsed()
@@ -202,7 +202,7 @@ fn merged_metrics(shared: &ControlShared) -> MetricsReport {
     report
 }
 
-/// Prometheus 文本渲染(exposition format;指标前缀 `service_watch_`)。
+/// Prometheus 文本渲染 (exposition format;指标前缀 `service_watch_`)。
 /// 输出一组 HELP/TYPE/值行。
 #[cfg(feature = "control-http")]
 fn prom_line(out: &mut String, name: &str, help: &str, kind: &str, val: u64) {
@@ -393,7 +393,7 @@ fn render_prometheus(m: &MetricsReport) -> String {
 }
 
 /// `GET /metrics`:默认 JSON;`?format=prometheus` 或 `Accept: text/plain`
-/// 返回 Prometheus 文本(DESIGN F13)。
+/// 返回 Prometheus 文本 (DESIGN F13)。
 #[cfg(feature = "control-http")]
 async fn metrics(
     State(shared): State<Arc<ControlShared>>,
@@ -402,7 +402,7 @@ async fn metrics(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let merged = merged_metrics(&shared);
-    // 协商优先级(评审 P2):显式 ?format 短路(可压过 Accept);无参数才看
+    // 协商优先级 (评审 P2):显式 ?format 短路 (可压过 Accept);无参数才看
     // Accept;Accept 忽略 q 值的误判由显式参数兜底。
     let wants_prom = match params.get("format").map(String::as_str) {
         Some("prometheus") => true,
@@ -428,19 +428,19 @@ async fn metrics(
 }
 
 // ---------------------------------------------------------------------------
-// F18 历史指标环形缓冲(/metrics/history)
+// F18 历史指标环形缓冲 (/metrics/history)
 // ---------------------------------------------------------------------------
 
-/// `?range=` 缺省窗口(秒)。
+/// `?range=` 缺省窗口 (秒)。
 #[cfg(feature = "control-http")]
 const METRICS_RANGE_DEFAULT_SECS: u64 = 300;
 
-/// 单次响应的最大样本点数:窗口内超过本值时等距降采样。
+/// 单次响应的最大样本点数：窗口内超过本值时等距降采样。
 #[cfg(feature = "control-http")]
 const METRICS_HISTORY_MAX_POINTS: usize = 600;
 
-/// `?range=<secs>` 解析(纯函数):缺省 300;上限 [`METRICS_HISTORY_CAP`]
-/// (超出收敛到上限 —— 缓冲之外本就无数据,超限不算非法);0/负数/非数字
+/// `?range=<secs>` 解析 (纯函数):缺省 300;上限 [`METRICS_HISTORY_CAP`]
+/// (超出收敛到上限 —— 缓冲之外本就无数据，超限不算非法);0/负数/非数字
 /// → `None`(端点回 400)。
 #[cfg(feature = "control-http")]
 fn parse_range_secs(raw: Option<&str>) -> Option<u64> {
@@ -454,18 +454,18 @@ fn parse_range_secs(raw: Option<&str>) -> Option<u64> {
     }
 }
 
-/// 窗口过滤(纯函数):保留 `at ≥ now - range` 的样本(时间升序入环,过滤
-/// 保序)。cutoff 下溢(墙钟早于 epoch)时退化为全保留 —— 时钟异常时宁多勿缺。
+/// 窗口过滤 (纯函数):保留 `at ≥ now - range` 的样本 (时间升序入环，过滤
+/// 保序)。cutoff 下溢 (墙钟早于 epoch) 时退化为全保留 —— 时钟异常时宁多勿缺。
 #[cfg(feature = "control-http")]
 fn window_samples(ring: &[MetricsSample], now: SystemTime, range: Duration) -> Vec<MetricsSample> {
     let cutoff = now.checked_sub(range).unwrap_or(SystemTime::UNIX_EPOCH);
     ring.iter().filter(|s| s.at >= cutoff).cloned().collect()
 }
 
-/// 等距降采样(纯函数):`len > max` 时按整数四舍五入等距抽取恰好 `max` 点,
+/// 等距降采样 (纯函数):`len > max` 时按整数四舍五入等距抽取恰好 `max` 点，
 /// **保留首尾**(最新样本必须在内 —— 运维视角最后一点即当前状态);否则
 /// 原样克隆返回。`max <= 1` 且非空 → 仅保留最新一点。len > max 保证相邻
-/// 抽取索引严格递增(round 单调 + 步距 > 1),无需去重。
+/// 抽取索引严格递增 (round 单调 + 步距 > 1),无需去重。
 #[cfg(feature = "control-http")]
 fn downsample(samples: &[MetricsSample], max: usize) -> Vec<MetricsSample> {
     let len = samples.len();
@@ -487,7 +487,7 @@ fn downsample(samples: &[MetricsSample], max: usize) -> Vec<MetricsSample> {
 
 /// `GET /metrics/history?range=<secs>`(F18):环形缓冲窗口快照,响应
 /// `{"samples":[{at, report}...], "count": N}`。数据源为 eval 每轮发布、随
-/// metrics watch 分发的环形缓冲句柄(单写者;此处只读,锁内仅做克隆)。
+/// metrics watch 分发的环形缓冲句柄 (单写者;此处只读，锁内仅做克隆)。
 #[cfg(feature = "control-http")]
 async fn metrics_history(
     State(shared): State<Arc<ControlShared>>,
@@ -503,7 +503,7 @@ async fn metrics_history(
     };
     let range = Duration::from_secs(range_secs);
     let latest = shared.metrics_rx.borrow().clone();
-    // 快照(eval 单写者,毒化恢复与 eval 侧一致:历史可丢、不 panic)。
+    // 快照 (eval 单写者，毒化恢复与 eval 侧一致：历史可丢、不 panic)。
     let ring: Vec<MetricsSample> = match latest.history.lock() {
         Ok(guard) => guard.iter().cloned().collect(),
         Err(poisoned) => poisoned.into_inner().iter().cloned().collect(),
@@ -532,7 +532,7 @@ async fn restart(
     send_command(&shared, ControlCommand::Restart { target })
 }
 
-/// `POST /v1/check/{target}`:绑定检查的 next_due 立即到期(eval 侧处理)。
+/// `POST /v1/check/{target}`:绑定检查的 next_due 立即到期 (eval 侧处理)。
 #[cfg(feature = "control-http")]
 async fn check(
     State(shared): State<Arc<ControlShared>>,
@@ -541,7 +541,7 @@ async fn check(
     send_command(&shared, ControlCommand::Check { target })
 }
 
-/// `POST /v1/reset/{target}`:解除 Fatal 闩锁 + 清空预算(eval 侧写审计)。
+/// `POST /v1/reset/{target}`:解除 Fatal 闩锁 + 清空预算 (eval 侧写审计)。
 #[cfg(feature = "control-http")]
 async fn reset(
     State(shared): State<Arc<ControlShared>>,
@@ -550,7 +550,7 @@ async fn reset(
     send_command(&shared, ControlCommand::Reset { target })
 }
 
-/// `POST /v1/reload` 请求体(可选):`{"path": "..."}` 指定配置文件;
+/// `POST /v1/reload` 请求体 (可选):`{"path": "..."}` 指定配置文件;
 /// 空 body / `{}` / `{"path": null}` → None(eval 侧回填启动配置路径)。
 #[cfg(feature = "control-http")]
 #[derive(Debug, Default, serde::Deserialize)]
@@ -560,7 +560,7 @@ struct ReloadBody {
 }
 
 /// `POST /v1/reload`(F14 配置热重载):触发 eval 重读配置并应用目标拓扑。
-/// body 可选(空 / JSON `{"path": "..."}`);`?format` 无关。入队 202;
+/// body 可选 (空 / JSON `{"path": "..."}`);`?format` 无关。入队 202;
 /// 非法 JSON body → 400;通道满/关闭 → 503(与其它命令端点一致)。
 #[cfg(feature = "control-http")]
 async fn reload(
@@ -583,7 +583,7 @@ async fn reload(
     send_command(&shared, ControlCommand::Reload { path })
 }
 
-/// 命令入队(DESIGN §2.2:通道满 → 503;关闭 = agent 停机中 → 503)。
+/// 命令入队 (DESIGN §2.2:通道满 → 503;关闭 = agent 停机中 → 503)。
 #[cfg(feature = "control-http")]
 fn send_command(shared: &ControlShared, cmd: ControlCommand) -> (StatusCode, &'static str) {
     match shared.cmd_tx.try_send(cmd) {
@@ -598,7 +598,7 @@ fn send_command(shared: &ControlShared, cmd: ControlCommand) -> (StatusCode, &'s
 }
 
 // ---------------------------------------------------------------------------
-// 测试(真实 socket 集成:临时端口 bind_and_serve + reqwest 断言端点行为)
+// 测试 (真实 socket 集成：临时端口 bind_and_serve + reqwest 断言端点行为)
 // ---------------------------------------------------------------------------
 
 #[cfg(all(test, feature = "control-http", feature = "http-client"))]
@@ -610,8 +610,8 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     /// 构造测试用 ControlShared(cmd 通道容量可调;sender 侧立即 drop,
-    /// 借以覆盖「sender 消失仍可读最后值」的防御路径)。metrics_tx 一并返回,
-    /// 供直推 watch 模拟 eval 发布(F18 历史随 metrics 报告搭载)。
+    /// 借以覆盖「sender 消失仍可读最后值」的防御路径)。metrics_tx 一并返回，
+    /// 供直推 watch 模拟 eval 发布 (F18 历史随 metrics 报告搭载)。
     #[allow(clippy::type_complexity)]
     fn shared_with(
         cmd_cap: usize,
@@ -646,7 +646,7 @@ mod tests {
         )
     }
 
-    /// 起服务于 127.0.0.1:0 临时端口,返回 base url(随测试 runtime 收尾)。
+    /// 起服务于 127.0.0.1:0 临时端口，返回 base url(随测试 runtime 收尾)。
     async fn spawn_server(shared: Arc<ControlShared>) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -683,7 +683,7 @@ mod tests {
         let report: StatusReport = resp.json().await.unwrap();
         assert!(report.targets.is_empty());
 
-        // /metrics:counters 侧字段合并(alerts_sent / alerts_dropped)
+        // /metrics:counters 侧字段合并 (alerts_sent / alerts_dropped)
         shared.alert_counters.sent.store(7, Ordering::Relaxed);
         shared.alert_counters.dropped.store(2, Ordering::Relaxed);
         let resp = reqwest::get(format!("{base}/metrics")).await.unwrap();
@@ -770,7 +770,7 @@ mod tests {
         let base = spawn_server(shared).await;
         let client = reqwest::Client::new();
 
-        // 空 body → Reload { path: None }(缺省重读启动配置路径,eval 侧回填)
+        // 空 body → Reload { path: None }(缺省重读启动配置路径，eval 侧回填)
         let resp = client
             .post(format!("{base}/v1/reload"))
             .send()
@@ -819,7 +819,7 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 400);
     }
 
-    /// reload 命令同样受通道容量约束(满 → 503)。
+    /// reload 命令同样受通道容量约束 (满 → 503)。
     #[tokio::test]
     async fn reload_endpoint_returns_503_when_queue_full() {
         let (shared, _rx, _status_tx, _metrics_tx) = shared_with(1);
@@ -846,7 +846,7 @@ mod tests {
         let base = spawn_server(shared).await;
         let client = reqwest::Client::new();
 
-        // 容量 1:第一笔入队(无消费者,滞留通道),第二笔 Full → 503
+        // 容量 1:第一笔入队 (无消费者，滞留通道),第二笔 Full → 503
         let resp = client
             .post(format!("{base}/v1/check/a"))
             .send()
@@ -864,7 +864,7 @@ mod tests {
     #[tokio::test]
     async fn command_returns_503_when_channel_closed() {
         let (shared, rx, _status_tx, _metrics_tx) = shared_with(16);
-        drop(rx); // eval 侧不存在(agent 停机语义)
+        drop(rx); // eval 侧不存在 (agent 停机语义)
         let base = spawn_server(shared).await;
 
         let resp = reqwest::Client::new()
@@ -875,7 +875,7 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 503);
     }
 
-    /// Prometheus 渲染:全部字段行存在 + 计数/类型注释正确(F13)。
+    /// Prometheus 渲染：全部字段行存在 + 计数/类型注释正确 (F13)。
     #[test]
     fn prometheus_render_covers_all_fields() {
         let m = MetricsReport {
@@ -924,7 +924,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // F22 Web 状态页(GET /)
+    // F22 Web 状态页 (GET /)
     // -----------------------------------------------------------------
 
     /// `GET /`:200 + text/html + 页面标题;XSS 转义函数必须在页内。
@@ -959,10 +959,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // F18 历史指标环形缓冲(/metrics/history)
+    // F18 历史指标环形缓冲 (/metrics/history)
     // -----------------------------------------------------------------
 
-    /// 初始(eval 未发布)为空;非法 range(0/负/非数字)→ 400。
+    /// 初始 (eval 未发布) 为空;非法 range(0/负/非数字)→ 400。
     #[tokio::test]
     async fn metrics_history_starts_empty_and_rejects_invalid_range() {
         let (shared, _rx, _status_tx, _metrics_tx) = shared_with(16);
@@ -973,7 +973,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status().as_u16(), 200);
         let hist: MetricsHistory = resp.json().await.unwrap();
-        assert!(hist.samples.is_empty(), "eval 尚未发布,应为空");
+        assert!(hist.samples.is_empty(), "eval 尚未发布，应为空");
         assert_eq!(hist.count, 0);
 
         for bad in ["0", "-1", "abc", "1.5", ""] {
@@ -984,7 +984,7 @@ mod tests {
         }
     }
 
-    /// eval 发布(直推 metrics watch 模拟)后非空;窗口外样本被过滤,
+    /// eval 发布 (直推 metrics watch 模拟) 后非空;窗口外样本被过滤，
     /// 窗口内按入环顺序返回。
     #[tokio::test]
     async fn metrics_history_reflects_published_eval_metrics() {
@@ -1002,7 +1002,7 @@ mod tests {
                 },
             });
         }
-        // 窗口外老样本(epoch,远早于缺省 300s 窗口):必须被过滤。
+        // 窗口外老样本 (epoch，远早于缺省 300s 窗口):必须被过滤。
         ring.push_front(MetricsSample {
             at: SystemTime::UNIX_EPOCH,
             report: MetricsReport::default(),
@@ -1018,12 +1018,12 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status().as_u16(), 200);
         let hist: MetricsHistory = resp.json().await.unwrap();
-        assert_eq!(hist.count, 3, "窗口外样本被过滤,窗口内全保留");
+        assert_eq!(hist.count, 3, "窗口外样本被过滤，窗口内全保留");
         assert_eq!(hist.samples.len(), hist.count);
         assert_eq!(hist.samples[0].report.probe_executed, 42);
         assert!(
             hist.samples.windows(2).all(|w| w[0].at <= w[1].at),
-            "按入环(时间升序)返回"
+            "按入环 (时间升序) 返回"
         );
     }
 
@@ -1048,7 +1048,7 @@ mod tests {
         };
         metrics_tx.send(Arc::new(report)).unwrap();
 
-        // range=7200:窗口覆盖全部 700 点 → 降采样至 600,首尾保留。
+        // range=7200:窗口覆盖全部 700 点 → 降采样至 600，首尾保留。
         let resp = reqwest::get(format!("{base}/metrics/history?range=7200"))
             .await
             .unwrap();
@@ -1071,7 +1071,7 @@ mod tests {
     // F18 纯函数:range 解析 / 窗口过滤 / 等距降采样
     // -----------------------------------------------------------------
 
-    /// `/metrics` JSON 契约不得携带环形缓冲句柄(serde skip;monitorctl 兼容
+    /// `/metrics` JSON 契约不得携带环形缓冲句柄 (serde skip;monitorctl 兼容
     /// 与 Prometheus 文本不受 F18 影响)。
     #[tokio::test]
     async fn metrics_json_omits_history_field() {
@@ -1094,7 +1094,7 @@ mod tests {
         }
     }
 
-    /// range 解析:缺省 300;0/负/非数字非法;超上限收敛到 7200。
+    /// range 解析：缺省 300;0/负/非数字非法;超上限收敛到 7200。
     #[test]
     fn parse_range_secs_defaults_validates_and_clamps() {
         assert_eq!(parse_range_secs(None), Some(300));
@@ -1112,7 +1112,7 @@ mod tests {
         assert_eq!(parse_range_secs(Some("")), None);
     }
 
-    /// 窗口过滤:cutoff 之后的样本按序保留,更早的丢弃。
+    /// 窗口过滤:cutoff 之后的样本按序保留，更早的丢弃。
     #[test]
     fn window_samples_keeps_only_in_range() {
         let ring = vec![sample_at(0), sample_at(100), sample_at(200), sample_at(399)];
@@ -1126,7 +1126,7 @@ mod tests {
                     .as_secs()
             })
             .collect();
-        assert_eq!(ats, [100, 200, 399], "cutoff=100 之前的样本被过滤,保序");
+        assert_eq!(ats, [100, 200, 399], "cutoff=100 之前的样本被过滤，保序");
     }
 
     /// 降采样:<600 全保留;>600 恰抽 600 且首尾保留;max<=1 保留最新。
@@ -1145,7 +1145,7 @@ mod tests {
         assert_eq!(kept[0].at, sample_at(0).at, "首点保留");
         assert_eq!(kept[599].at, sample_at(999).at, "最新点保留");
         for w in kept.windows(2) {
-            assert!(w[0].at < w[1].at, "抽取索引严格递增(无重复点)");
+            assert!(w[0].at < w[1].at, "抽取索引严格递增 (无重复点)");
         }
 
         let one = downsample(&above, 1);

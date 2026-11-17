@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# F17 完成门:24h 性能长跑(ROADMAP「F17 完成门」)
-# - 固定版本快照(二进制 + 配置复制到独立目录,运行期不重建)
+# F17 完成门:24h 性能长跑 (ROADMAP「F17 完成门」)
+# - 固定版本快照 (二进制 + 配置复制到独立目录，运行期不重建)
 # - 合成稳定负载:self-http 自检 + supervise sleep + tcp 探测
-# - 每 60s 采样:时间戳 / %cpu(生命周期均值=总CPU/uptime)/ RSS / /ready 状态
-# - 24h 后 SIGTERM 退出,记录退出码;判定:
+# - 每 60s 采样：时间戳 / %cpu(生命周期均值=总 CPU/uptime)/ RSS / /ready 状态
+# - 24h 后 SIGTERM 退出，记录退出码;判定：
 #   1) 生命周期 CPU 均值 < 2%(单核)
-#   2) RSS 稳态增长(第 2 小时起 → 结束)< 20MB(排除启动分配)
+#   2) RSS 稳态增长 (第 2 小时起 → 结束)< 20MB(排除启动分配)
 #   3) /ready 失败采样 = 0
 #   4) 退出码 = 0(SIGTERM 优雅)
-# 用法: docs/deploy/soak-24h.sh [秒数,默认 86400]
+# 用法：docs/deploy/soak-24h.sh [秒数，默认 86400]
 
 set -uo pipefail
 
 BIN_SRC="${BIN_SRC:-./target/release/monitor-agent}"
 SECONDS_TOTAL="${1:-86400}"
 PORT=19199
-# 教训(第一次长跑被 /var/tmp 系统清理器抹掉):默认必须用持久目录
+# 教训 (第一次长跑被 /var/tmp 系统清理器抹掉):默认必须用持久目录
 ROOT="${SOAK_DIR:-$HOME/.local/state/sw-soak-24h}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 RUN_DIR="$ROOT/$STAMP"
@@ -95,16 +95,16 @@ echo "agent exit code: $EXIT_CODE" >> "$LOG"
 echo "ready_failures: $READY_FAILS" >> "$LOG"
 
 # ---- 判定 ----
-# CPU:排除首个采样(含启动尖峰)后的生命周期均值
+# CPU:排除首个采样 (含启动尖峰) 后的生命周期均值
 AVG_CPU=$(grep -v "sample=1 " "$LOG" | awk -F'cpu=' '/sample=/{split($2,a," "); s+=a[1]; n++} END {if(n) printf "%.2f", s/n; else print "-"}')
-# RSS 稳态:第 120 采样(约 2h)之后
+# RSS 稳态：第 120 采样 (约 2h) 之后
 RSS_BASE=$(awk -F'rss_kb=' '/sample=120/{split($2,a," "); print a[1]; exit}' "$LOG")
 RSS_LAST=$(awk -F'rss_kb=' '/sample=/{split($2,a," "); v=a[1]} END {print v}' "$LOG")
 GROWTH=$(( ${RSS_LAST:-0} - ${RSS_BASE:-0} ))
 
 VERDICT_LINE=0
 awk -v c="$AVG_CPU" 'BEGIN { exit !(c != "-" && c < 2.0) }' || { echo "FAIL: avg cpu $AVG_CPU >= 2%" >> "$VERDICT"; VERDICT_LINE=1; }
-(( ${RSS_BASE:-0} > 0 )) || { echo "SKIP: 样本不足 120,RSS 判定跳过(短跑?)" >> "$VERDICT"; }
+(( ${RSS_BASE:-0} > 0 )) || { echo "SKIP: 样本不足 120,RSS 判定跳过 (短跑？)" >> "$VERDICT"; }
 (( GROWTH < 20480 )) || { echo "FAIL: rss growth ${GROWTH}KB >= 20MB" >> "$VERDICT"; VERDICT_LINE=1; }
 (( READY_FAILS == 0 )) || { echo "FAIL: ready failures $READY_FAILS" >> "$VERDICT"; VERDICT_LINE=1; }
 (( EXIT_CODE == 0 || EXIT_CODE == 130 )) || { echo "FAIL: exit code $EXIT_CODE" >> "$VERDICT"; VERDICT_LINE=1; }

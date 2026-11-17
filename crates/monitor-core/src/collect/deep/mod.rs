@@ -103,7 +103,7 @@ mod tests {
                 .iter()
                 .any(|d| { matches!(d, Degradation::CollectorInit { .. }) })
         );
-        // 每类硬件必须有读数或显式降级,实际数量由运行平台决定。
+        // 每类硬件必须有读数或显式降级，实际数量由运行平台决定。
         assert!(
             !out.hardware.fans.is_empty()
                 || out.hardware.degradations.iter().any(|d| {

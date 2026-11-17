@@ -1,5 +1,5 @@
-//! HTTP 探测集成测试(DESIGN §11.3):真实 axum stub + 真实调度器,
-//! 端到端验证「慢响应 → 告警 → 恢复」链路(F4 验收)。
+//! HTTP 探测集成测试 (DESIGN §11.3):真实 axum stub + 真实调度器，
+//! 端到端验证「慢响应 → 告警 → 恢复」链路 (F4 验收)。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +14,7 @@ use monitor_core::model::ids::ProcessIdentity;
 use monitor_core::recover::process::ProcessManager;
 use tokio::sync::{mpsc, watch};
 
-/// 可脚本化的 HTTP stub:延迟(毫秒)与状态码运行时可调。
+/// 可脚本化的 HTTP stub:延迟 (毫秒) 与状态码运行时可调。
 struct Stub {
     delay_ms: Arc<AtomicU64>,
     status: Arc<AtomicU64>,
@@ -77,8 +77,8 @@ fn http_check_config(url: String, timeout_ms: u64, interval_ms: u64) -> Config {
     }
 }
 
-/// 调度器装配:自建采集线程(200ms 快照;与 runtime.collect_loop 同形)+
-/// eval 后台任务;返回告警队列(事件经 pop 排空断言)。
+/// 调度器装配：自建采集线程 (200ms 快照;与 runtime.collect_loop 同形)+
+/// eval 后台任务;返回告警队列 (事件经 pop 排空断言)。
 async fn spawn_scheduler(
     cfg: Config,
 ) -> (
@@ -106,7 +106,7 @@ async fn spawn_scheduler(
             }
         });
     }
-    let (journal_tx, _journal_rx) = mpsc::channel(64); // 接收端持有不消费(测试不落盘)
+    let (journal_tx, _journal_rx) = mpsc::channel(64); // 接收端持有不消费 (测试不落盘)
     let (cmd_tx, cmd_rx) = mpsc::channel(4);
     drop(cmd_tx); // 无控制平面
     let (metrics_tx, metrics_rx) = watch::channel(Arc::new(
@@ -135,7 +135,7 @@ async fn spawn_scheduler(
     (queue, task, metrics_rx)
 }
 
-/// 排空队列(shutdown watch 恒真:pop 取空即停,不挂起)。
+/// 排空队列 (shutdown watch 恒真:pop 取空即停，不挂起)。
 async fn drain(queue: &Arc<AlertQueue>) -> Vec<AlertEvent> {
     let (_, always_shutdown) = watch::channel(true);
     let mut out = Vec::new();
@@ -152,7 +152,7 @@ async fn slow_response_alerts_and_recovers_without_false_critical() {
     let cfg = http_check_config(url, 100, 200);
     let (queue, task, metrics_rx) = spawn_scheduler(cfg).await;
 
-    // 阶段 1:快速 200 —— 首轮探测成功,无事件。
+    // 阶段 1:快速 200 —— 首轮探测成功，无事件。
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(
         drain(&queue)
@@ -170,12 +170,12 @@ async fn slow_response_alerts_and_recovers_without_false_critical() {
     stub.delay_ms.store(0, Ordering::Relaxed);
     tokio::time::sleep(Duration::from_millis(900)).await;
 
-    // 运行指标管线:eval 每轮发布(监控运行情况的验收断言)。
+    // 运行指标管线:eval 每轮发布 (监控运行情况的验收断言)。
     let m = metrics_rx.borrow().clone();
     assert_eq!(m.targets_total, 1, "必须上报 target 总数");
     assert!(
         m.probe_executed >= 3,
-        "预热期应已执行多轮探测,实际 {}",
+        "预热期应已执行多轮探测，实际 {}",
         m.probe_executed
     );
     assert!(m.uptime_secs < 60, "uptime 应为运行时长");
@@ -187,15 +187,15 @@ async fn slow_response_alerts_and_recovers_without_false_critical() {
 
     assert!(
         cats.contains(&(Category::Alert, Severity::Warning)),
-        "超时失败必须产生 Warning 告警,实际 {cats:?}"
+        "超时失败必须产生 Warning 告警，实际 {cats:?}"
     );
     assert!(
         cats.contains(&(Category::Escalate, Severity::Critical)),
-        "连续 failure_threshold 次失败必须升级 Critical,实际 {cats:?}"
+        "连续 failure_threshold 次失败必须升级 Critical，实际 {cats:?}"
     );
     assert!(
         cats.iter().any(|(c, _)| *c == Category::Resolve),
-        "连续 success_threshold 次成功必须 Resolve,实际 {cats:?}"
+        "连续 success_threshold 次成功必须 Resolve，实际 {cats:?}"
     );
     // 顺序约束:Alert → Escalate → … → Resolve(最后一个 Resolve 在 Escalate 之后)。
     let alert_idx = cats.iter().position(|x| x.0 == Category::Alert).unwrap();
@@ -204,11 +204,11 @@ async fn slow_response_alerts_and_recovers_without_false_critical() {
         .iter()
         .rposition(|x| x.0 == Category::Resolve)
         .expect("有 Resolve");
-    assert!(alert_idx < esc_idx, "Warning 先于 Critical,实际 {cats:?}");
-    assert!(resolve_idx > esc_idx, "Resolve 在升级之后,实际 {cats:?}");
+    assert!(alert_idx < esc_idx, "Warning 先于 Critical，实际 {cats:?}");
+    assert!(resolve_idx > esc_idx, "Resolve 在升级之后，实际 {cats:?}");
 }
 
-/// 状态码区间闭边界:199/300 拒绝,200/299 接受(StatusRange "200-299")。
+/// 状态码区间闭边界:199/300 拒绝，200/299 接受 (StatusRange "200-299")。
 #[cfg(feature = "probe-http")]
 #[tokio::test(flavor = "multi_thread")]
 async fn status_range_boundaries() {

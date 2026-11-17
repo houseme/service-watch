@@ -51,10 +51,12 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             agent_features: collect-deep-hardware
-          - os: macos-latest # arm64 runner,x86_64 为交叉目标(rustup target)
+          # macos-latest 池容量不稳(第七轮发布首跑 runner 未分配 ×2),
+          # 显式钉版本:arm64 → macos-14,x86_64 → macos-13(intel 原生池)
+          - os: macos-14
             target: aarch64-apple-darwin
             agent_features: collect-deep-hardware
-          - os: macos-latest
+          - os: macos-13
             target: x86_64-apple-darwin
             agent_features: collect-deep-hardware
           - os: windows-latest

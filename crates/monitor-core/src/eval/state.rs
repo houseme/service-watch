@@ -1,4 +1,4 @@
-//! 检查状态机(DESIGN.md §7.1)。纯逻辑,时间由调用方以单调 `Instant` 注入。
+//! 检查状态机 (DESIGN.md §7.1)。纯逻辑，时间由调用方以单调 `Instant` 注入。
 //!
 //! ```text
 //! Ok ──1 次失败──▶ Warning ──连续 failure_threshold 次失败──▶ Critical
@@ -55,7 +55,7 @@ impl CheckStateMachine {
         self.consecutive_failures
     }
 
-    /// 观测一次探测结果,返回发生的级别转移(无转移则 `None`)。
+    /// 观测一次探测结果，返回发生的级别转移 (无转移则 `None`)。
     pub fn observe(&mut self, ok: bool) -> Option<HealthLevel> {
         let prev = self.level;
         if ok {
@@ -119,9 +119,9 @@ mod tests {
         s.observe(false);
         s.observe(false);
         s.observe(false); // Critical
-        assert_eq!(s.observe(true), None); // 1 次成功:不恢复
+        assert_eq!(s.observe(true), None); // 1 次成功：不恢复
         assert_eq!(s.level(), HealthLevel::Critical);
-        assert_eq!(s.observe(true), Some(HealthLevel::Ok)); // 连续第 2 次:恢复
+        assert_eq!(s.observe(true), Some(HealthLevel::Ok)); // 连续第 2 次：恢复
     }
 
     #[test]
@@ -131,7 +131,7 @@ mod tests {
         s.observe(true); // 中断连败
         assert_eq!(s.consecutive_failures(), 0);
         assert_eq!(s.level(), HealthLevel::Warning); // 仍在 Warning(未恢复)
-        assert_eq!(s.observe(false), None); // 重新计数,不升级
+        assert_eq!(s.observe(false), None); // 重新计数，不升级
     }
 
     #[test]

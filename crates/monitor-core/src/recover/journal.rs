@@ -1,27 +1,27 @@
-//! journal:append-only JSONL 持久化(DESIGN.md §8.7、ROADMAP F7)。
+//! journal:append-only JSONL 持久化 (DESIGN.md §8.7、ROADMAP F7)。
 //!
-//! 记录 incident 转移、自动重启、Fatal 闩锁、reset 与审计;agent 重启后重放,
+//! 记录 incident 转移、自动重启、Fatal 闩锁、reset 与审计;agent 重启后重放，
 //! 恢复 budget 窗口与 Fatal。写线程独占文件 I/O,eval 只发消息。
 //!
 //! 文件 I/O 在独占的阻塞任务执行。产品路径的关键事件通过
-//! [`JournalSender::send`] 等待 `sync_data` 确认,有界超时或写失败触发
+//! [`JournalSender::send`] 等待 `sync_data` 确认，有界超时或写失败触发
 //! 持久化故障停机。普通审计走 `try_send`,满队列时计数并报告丢弃。
 //!
 //! 重放语义:**按行顺序应用**——同 target 的 `Reset` 清除其 Fatal 与既有重启
-//! 计数素材,其后新的 `Fatal`/`Restart` 照常生效(§8.7 孤儿对账的前置数据)。
+//! 计数素材，其后新的 `Fatal`/`Restart` 照常生效 (§8.7 孤儿对账的前置数据)。
 //!
-//! ## 崩溃启动事务(ROADMAP「崩溃启动事务」)
+//! ## 崩溃启动事务 (ROADMAP「崩溃启动事务」)
 //!
-//! 成对事件消除「OS spawn 成功到第一条身份落盘确认」之间的未知实例窗口:
+//! 成对事件消除「OS spawn 成功到第一条身份落盘确认」之间的未知实例窗口：
 //! - [`JournalEvent::SpawnIntent`]:spawn **前**由 eval 以 `send().await` 确认
-//!   落盘(与 Fatal 同级),携带 [`config_digest`](服务定义摘要);
-//! - [`JournalEvent::SpawnOutcome`]:spawn 返回后立即落盘(成功带身份,
+//!   落盘 (与 Fatal 同级),携带 [`config_digest`](服务定义摘要);
+//! - [`JournalEvent::SpawnOutcome`]:spawn 返回后立即落盘 (成功带身份，
 //!   失败 `identity: None` + `pid_confirmed: false`),关闭窗口。
 //!
 //! agent 在两事件之间崩溃 → 重放后 [`JournalState::pending_spawns`] 留下
-//! 未决意图;eval 冷启动据此对账(digest 匹配当前定义 → 存在未知实例,
+//! 未决意图;eval 冷启动据此对账 (digest 匹配当前定义 → 存在未知实例，
 //! 跳过冷启动防双实例)。`SpawnOutcome` 与 `Reset`/`ResetTargets` 关闭
-//! 对应条目(reset = 人工承认未知实例已处置,重启后允许拉起)。
+//! 对应条目 (reset = 人工承认未知实例已处置，重启后允许拉起)。
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -71,7 +71,7 @@ impl JournalCounters {
         }
     }
 
-    /// 标记持久化故障(闩锁;writer 写失败与演练/外部观察共用入口)。
+    /// 标记持久化故障 (闩锁;writer 写失败与演练/外部观察共用入口)。
     pub fn fail(&self) {
         self.failed.store(true, Ordering::Release);
         self.failure_notify.notify_one();
@@ -88,7 +88,7 @@ impl JournalCounters {
 
     fn dropped(&self) {
         let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-        // 持续拥塞时周期重复报告,同时避免每条事件产生一条日志。
+        // 持续拥塞时周期重复报告，同时避免每条事件产生一条日志。
         if total == 1 || total.is_multiple_of(64) {
             tracing::error!(dropped = total, "journal queue unavailable; event dropped");
         }
@@ -173,8 +173,8 @@ impl JournalSender {
     }
 
     /// 关键状态等待 writer 的 sync_data 确认。2s 总预算覆盖队列背压与写入。
-    /// 失败触发故障停机,避免当前 agent 继续在不可持久化的预算上自动恢复。
-    /// 从裸 mpsc sender 转换的兼容出口只确认入队,持久化由嵌入调用者负责。
+    /// 失败触发故障停机，避免当前 agent 继续在不可持久化的预算上自动恢复。
+    /// 从裸 mpsc sender 转换的兼容出口只确认入队，持久化由嵌入调用者负责。
     pub async fn send(&self, event: JournalEvent) -> std::result::Result<(), String> {
         let mut queued = false;
         let attempt = async {
@@ -213,7 +213,7 @@ impl JournalSender {
     }
 }
 
-/// 单条 journal 记录(JSONL 一行)。
+/// 单条 journal 记录 (JSONL 一行)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JournalEvent {
@@ -229,7 +229,7 @@ pub enum JournalEvent {
     Restart {
         at: SystemTime,
         target: String,
-        /// uptime < min_uptime 视为 crash loop 嫌疑(信息用;计数不分快慢)。
+        /// uptime < min_uptime 视为 crash loop 嫌疑 (信息用;计数不分快慢)。
         fast_exit: bool,
     },
     Fatal {
@@ -256,14 +256,14 @@ pub enum JournalEvent {
         #[serde(default)]
         verified: bool,
     },
-    /// 崩溃启动事务:spawn 前落盘的启动意图(await 确认,与 Fatal 同级)。
-    /// `config_digest` 为服务定义摘要,供冷启动对账识别意图属于当前还是旧定义。
+    /// 崩溃启动事务:spawn 前落盘的启动意图 (await 确认，与 Fatal 同级)。
+    /// `config_digest` 为服务定义摘要，供冷启动对账识别意图属于当前还是旧定义。
     SpawnIntent {
         at: SystemTime,
         target: String,
         config_digest: String,
     },
-    /// 崩溃启动事务:spawn 结果(成功带身份;失败无身份且未确认 pid),
+    /// 崩溃启动事务:spawn 结果 (成功带身份;失败无身份且未确认 pid),
     /// 关闭对应 [`JournalEvent::SpawnIntent`] 开启的未知实例窗口。
     SpawnOutcome {
         at: SystemTime,
@@ -299,37 +299,37 @@ pub struct PersistedProcess {
     pub verified: bool,
 }
 
-/// 崩溃启动事务的未决意图(target 级;`SpawnOutcome`/`Reset` 关闭即移除)。
+/// 崩溃启动事务的未决意图 (target 级;`SpawnOutcome`/`Reset` 关闭即移除)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSpawn {
-    /// 意图落盘时刻(墙钟;诊断用)。
+    /// 意图落盘时刻 (墙钟;诊断用)。
     pub at: SystemTime,
-    /// 意图对应的服务定义摘要([`config_digest`])。
+    /// 意图对应的服务定义摘要 ([`config_digest`])。
     pub config_digest: String,
 }
 
-/// 重放结果(agent 启动时加载)。
+/// 重放结果 (agent 启动时加载)。
 #[derive(Debug, Default, Clone)]
 pub struct JournalState {
-    /// target → 窗口内自动重启时间戳(重放时按 restart_window 过滤由调用方做)。
+    /// target → 窗口内自动重启时间戳 (重放时按 restart_window 过滤由调用方做)。
     pub restarts: BTreeMap<String, Vec<SystemTime>>,
     pub fatal: HashSet<String>,
     pub last_reset: BTreeMap<String, SystemTime>,
     pub processes: BTreeMap<String, PersistedProcess>,
-    /// 崩溃启动事务:target → 未决启动意图(意图已落盘、结果未到 =
-    /// 上次 agent 在 spawn 与结果落盘之间崩溃,存在未知实例)。
+    /// 崩溃启动事务:target → 未决启动意图 (意图已落盘、结果未到 =
+    /// 上次 agent 在 spawn 与结果落盘之间崩溃，存在未知实例)。
     pub pending_spawns: BTreeMap<String, PendingSpawn>,
 }
 
-/// 服务定义摘要(崩溃启动事务对账键):[`ServiceCfg`] 经 serde JSON 序列化
-/// (字段按声明序,确定性)后交给 `DefaultHasher`(`new()` 固定密钥,
-/// **跨进程稳定** —— 这是跨重启对账的前提,不得改用 `RandomState`)。
-/// 十六进制字符串;序列化失败(不可能,配置层已校验)以 `"null"` 兜底。
+/// 服务定义摘要 (崩溃启动事务对账键):[`ServiceCfg`] 经 serde JSON 序列化
+/// (字段按声明序，确定性) 后交给 `DefaultHasher`(`new()` 固定密钥，
+/// **跨进程稳定** —— 这是跨重启对账的前提，不得改用 `RandomState`)。
+/// 十六进制字符串;序列化失败 (不可能，配置层已校验) 以 `"null"` 兜底。
 pub fn config_digest(cfg: &ServiceCfg) -> String {
     // H-P2:digest 只覆盖**热字段集**(name + command/args/workdir/env/windows_service
-    // —— 与 reload::service_hot_changed 对齐)+ FNV-1a-64(跨工具链稳定,
+    // —— 与 reload::service_hot_changed 对齐)+ FNV-1a-64(跨工具链稳定，
     // DefaultHasher 不保证跨 rustc 版本;升级 agent 二进制恰是崩溃后重启高发
-    // 场景,软字段变更(restart/activate)不得改变意图归属 → 防 fail-open 双实例)。
+    // 场景，软字段变更 (restart/activate) 不得改变意图归属 → 防 fail-open 双实例)。
     use std::collections::hash_map::DefaultHasher as _UnusedStd;
     use std::hash::Hasher;
     let _ = std::any::type_name::<_UnusedStd>();
@@ -343,7 +343,7 @@ pub fn config_digest(cfg: &ServiceCfg) -> String {
         &serde_json::to_string(&cfg.windows_service).unwrap_or_default(),
     ] {
         h.write(piece.as_bytes());
-        h.write(b"\x1f"); // 单元分隔符,防拼接歧义
+        h.write(b"\x1f"); // 单元分隔符，防拼接歧义
     }
     format!("{:016x}", h.finish())
 }
@@ -367,7 +367,7 @@ impl std::hash::Hasher for Fnv64 {
     }
 }
 
-/// 打开 journal 并确认可持久化,应在任何恢复任务启动前调用。
+/// 打开 journal 并确认可持久化，应在任何恢复任务启动前调用。
 pub fn open_writer(path: &Path) -> Result<std::fs::File> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -384,7 +384,7 @@ pub fn open_writer(path: &Path) -> Result<std::fs::File> {
         let mut last = [0];
         file.read_exact(&mut last)?;
         if last[0] != b'\n' {
-            // 为旧的完整无换行记录及崩溃半行划定边界,使后续已确认记录可重放。
+            // 为旧的完整无换行记录及崩溃半行划定边界，使后续已确认记录可重放。
             file.write_all(b"\n")?;
         }
     }
@@ -403,7 +403,7 @@ pub async fn run_writer(path: PathBuf, mut rx: mpsc::Receiver<JournalEvent>) -> 
         })
     })
     .await
-    .map_err(|e| crate::error::CoreError::Recover(format!("journal 写任务异常退出: {e}")))?
+    .map_err(|e| crate::error::CoreError::Recover(format!("journal 写任务异常退出：{e}")))?
 }
 
 /// 产品写入口。文件已由 runtime 在任务启动前打开并确认可写。
@@ -420,7 +420,7 @@ pub async fn run_tracked_writer(
     .await
     .map_err(|e| {
         failures.fail();
-        crate::error::CoreError::Recover(format!("journal 写任务异常退出: {e}"))
+        crate::error::CoreError::Recover(format!("journal 写任务异常退出：{e}"))
     })?;
     if result.is_err() {
         failures.fail();
@@ -454,7 +454,7 @@ fn write_events(
             counters.dropped();
             tracing::error!(path = %path.display(), error = %e, "journal write failed; stopping recovery runtime");
             counters.fail();
-            // 写失败可能留下半行。立即关闭通道,防止后续记录接在半行后被重放丢弃。
+            // 写失败可能留下半行。立即关闭通道，防止后续记录接在半行后被重放丢弃。
             return Err(e);
         }
         counters.write_successes.fetch_add(1, Ordering::Relaxed);
@@ -478,12 +478,12 @@ pub fn replay(path: &Path) -> JournalState {
     }
 }
 
-/// 运行时重放入口。无法读取既有日志时拒绝启动,避免空状态绕过 Fatal 闩锁。
+/// 运行时重放入口。无法读取既有日志时拒绝启动，避免空状态绕过 Fatal 闩锁。
 pub fn replay_checked(path: &Path) -> Result<JournalState> {
     let mut state = JournalState::default();
-    // H-P2:字节级读取 —— 断电撕裂点落在多字节 UTF-8 字符内部时,
-    // read_to_string 会整体失败(InvalidData)并升级为 agent 拒绝启动;
-    // 逐字节切行 + 尾行 lossy 净化,与 open_writer 半行定界哲学一致。
+    // H-P2:字节级读取 —— 断电撕裂点落在多字节 UTF-8 字符内部时，
+    // read_to_string 会整体失败 (InvalidData) 并升级为 agent 拒绝启动;
+    // 逐字节切行 + 尾行 lossy 净化，与 open_writer 半行定界哲学一致。
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(state),
@@ -505,7 +505,7 @@ pub fn replay_checked(path: &Path) -> Result<JournalState> {
     Ok(state)
 }
 
-/// 按行顺序应用单条事件(Reset 之后同 target 的新 Fatal 仍要置位)。
+/// 按行顺序应用单条事件 (Reset 之后同 target 的新 Fatal 仍要置位)。
 fn apply(event: &JournalEvent, state: &mut JournalState) {
     match event {
         JournalEvent::Restart { at, target, .. } => {
@@ -516,13 +516,13 @@ fn apply(event: &JournalEvent, state: &mut JournalState) {
         }
         JournalEvent::Reset { at, target, .. } => {
             state.fatal.remove(target);
-            // Reset 语义 = 解除闩锁 + 清空预算(DESIGN §8.2 / FSM reset):重放时
-            // 同样必须清掉该 target 的既有重启素材,否则 monitorctl reset 后
+            // Reset 语义 = 解除闩锁 + 清空预算 (DESIGN §8.2 / FSM reset):重放时
+            // 同样必须清掉该 target 的既有重启素材，否则 monitorctl reset 后
             // 重启 agent,Reset 之前的旧重启记录会复活并继续计入预算窗口
-            // (第五轮评审:模块 doc 声称清除但 apply 未实现)。
+            // (第五轮评审：模块 doc 声称清除但 apply 未实现)。
             state.restarts.remove(target);
-            // 崩溃启动事务:reset = 人工承认未知实例已处置,清除未决意图,
-            // 重启后允许拉起(对账不再跳过冷启动)。
+            // 崩溃启动事务:reset = 人工承认未知实例已处置，清除未决意图，
+            // 重启后允许拉起 (对账不再跳过冷启动)。
             state.pending_spawns.remove(target);
             state.last_reset.insert(target.clone(), *at);
         }
@@ -552,7 +552,7 @@ fn apply(event: &JournalEvent, state: &mut JournalState) {
                 state.processes.remove(target);
             }
         }
-        // 崩溃启动事务:新意图重新开启未知实例窗口;结果(成功或失败)关闭之。
+        // 崩溃启动事务：新意图重新开启未知实例窗口;结果 (成功或失败) 关闭之。
         JournalEvent::SpawnIntent {
             at,
             target,
@@ -574,7 +574,7 @@ fn apply(event: &JournalEvent, state: &mut JournalState) {
         } => {
             state.pending_spawns.remove(target);
             // H-P2:成功 outcome 回填身份 —— intent→outcome→ProcessIdentity 三段
-            // 之间崩溃时,重放不再拿陈旧身份做孤儿对账(残余双实例窗口关闭)。
+            // 之间崩溃时，重放不再拿陈旧身份做孤儿对账 (残余双实例窗口关闭)。
             if *pid_confirmed && let Some(id) = identity {
                 state.processes.insert(
                     target.clone(),
@@ -585,7 +585,7 @@ fn apply(event: &JournalEvent, state: &mut JournalState) {
                 );
             }
         }
-        // incident/audit 仅存档,不参与恢复状态重建
+        // incident/audit 仅存档，不参与恢复状态重建
         JournalEvent::Incident { .. } | JournalEvent::Audit { .. } => {}
     }
 }
@@ -608,7 +608,7 @@ mod tests {
                 .await
         });
         let request = rx.recv().await.unwrap();
-        assert!(!task.is_finished(), "入队成功仍需等待writer确认");
+        assert!(!task.is_finished(), "入队成功仍需等待 writer 确认");
         request.ack.unwrap().send(Ok(())).unwrap();
         assert!(task.await.unwrap().is_ok());
     }
@@ -776,7 +776,7 @@ mod tests {
     }
 
     /// Reset / ResetTargets 清除未决意图:monitorctl reset 后重启 agent
-    /// 不再因旧意图跳过冷启动(「reset 后可强制拉起」语义)。
+    /// 不再因旧意图跳过冷启动 (「reset 后可强制拉起」语义)。
     #[test]
     fn spawn_pending_intent_is_cleared_by_reset_events() {
         let t = base();
@@ -817,7 +817,7 @@ mod tests {
         assert!(state.pending_spawns.is_empty(), "ResetTargets 清除未决意图");
     }
 
-    /// 两类事务事件必须走关键通道(await 确认落盘),否则窗口语义失效。
+    /// 两类事务事件必须走关键通道 (await 确认落盘),否则窗口语义失效。
     #[test]
     fn spawn_transaction_events_are_critical() {
         let intent = JournalEvent::SpawnIntent {
@@ -833,7 +833,7 @@ mod tests {
         };
         assert!(intent.is_critical());
         assert!(outcome.is_critical());
-        // serde 往返(反序列化侧字段齐全)
+        // serde 往返 (反序列化侧字段齐全)
         let round: JournalEvent =
             serde_json::from_str(&serde_json::to_string(&intent).unwrap()).unwrap();
         assert_eq!(
@@ -842,7 +842,7 @@ mod tests {
         );
     }
 
-    /// 摘要语义:同定义同值;command/args 变更即变(旧定义意图据此识别)。
+    /// 摘要语义：同定义同值;command/args 变更即变 (旧定义意图据此识别)。
     #[test]
     fn config_digest_is_stable_and_tracks_definition_changes() {
         let a = sample_service("/bin/app", &["30"]);
@@ -891,7 +891,7 @@ mod tests {
         assert_eq!(counters.snapshot().critical_failures, 1);
         assert!(
             !other.counters().has_failed(),
-            "故障只属于创建该sender的runtime"
+            "故障只属于创建该 sender 的 runtime"
         );
     }
 
@@ -950,7 +950,7 @@ mod tests {
         cleanup(&dir);
     }
 
-    /// 各测试独立的临时目录(本 crate 不依赖 tempfile;用 pid + 测试名隔离)。
+    /// 各测试独立的临时目录 (本 crate 不依赖 tempfile;用 pid + 测试名隔离)。
     fn tmp_dir(test: &str) -> PathBuf {
         std::env::temp_dir().join(format!("sw-journal-test-{}-{}", std::process::id(), test))
     }
@@ -1076,7 +1076,7 @@ mod tests {
         )
         .unwrap();
         let state = replay(&path);
-        assert_eq!(state.restarts["a"].len(), 1, "坏行/缺字段行均跳过,好行保留");
+        assert_eq!(state.restarts["a"].len(), 1, "坏行/缺字段行均跳过，好行保留");
         assert!(state.fatal.contains("a"));
         cleanup(&dir);
     }
@@ -1127,7 +1127,7 @@ mod tests {
         assert_eq!(
             state.restarts["a"].len(),
             1,
-            "Reset 前的 2 条旧重启被清,仅 Reset 后的 1 条保留"
+            "Reset 前的 2 条旧重启被清，仅 Reset 后的 1 条保留"
         );
         assert_eq!(state.last_reset["a"], t + Duration::from_secs(5));
         cleanup(&dir);

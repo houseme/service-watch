@@ -1,9 +1,9 @@
 <!DOCTYPE html>
 <!--
-  F22 service-watch 只读状态页(经 include_str! 编译期嵌入 agent 控制平面,GET /)。
-  零外部依赖:无 CDN/字体/图标/框架,内联 CSS 与 JS。
-  页面严格只读:不提供任何写操作入口;数据仅来自 GET /status 与 GET /metrics(JSON)。
-  安全约定:所有插值一律经 escapeHtml(target 名等来自配置,可能含 <>'"&)。
+  F22 service-watch 只读状态页 (经 include_str! 编译期嵌入 agent 控制平面，GET /)。
+  零外部依赖：无 CDN/字体/图标/框架,内联 CSS 与 JS。
+  页面严格只读：不提供任何写操作入口;数据仅来自 GET /status 与 GET /metrics(JSON)。
+  安全约定：所有插值一律经 escapeHtml(target 名等来自配置，可能含 <>'"&)。
 -->
 <html lang="en">
 <head>
@@ -97,7 +97,7 @@
   .badge-crit { color: var(--crit); border-color: var(--crit); background: rgba(248, 81, 73, .14); }
   .chip-state { padding: 1px 9px; font-size: 12px; }
   footer { color: var(--muted); font-size: 12px; }
-  /* 刷新失败:保留上次数据,整体变灰(agent unreachable 徽章保持醒目)。 */
+  /* 刷新失败：保留上次数据，整体变灰 (agent unreachable 徽章保持醒目)。 */
   body.stale .panel, body.stale footer { opacity: .55; filter: grayscale(.85); }
   @media (prefers-color-scheme: light) {
     :root {
@@ -159,7 +159,7 @@
   var REFRESH_MS = 2000;
   var ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
-  // 所有插值(名称/模式/级别等来自配置,可能含 <>"'&)必须经此转义,防 XSS。
+  // 所有插值 (名称/模式/级别等来自配置，可能含 <>"'&) 必须经此转义，防 XSS。
   function escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, function (ch) { return ESCAPES[ch]; });
   }
@@ -239,7 +239,7 @@
       status.ready ? "ready" : "not ready",
       status.ready ? "chip-ok" : "chip-warn"
     );
-    // uptime 以 eval 单调源(metrics.uptime_secs)为准;缺失时由 started_at 推导。
+    // uptime 以 eval 单调源 (metrics.uptime_secs) 为准;缺失时由 started_at 推导。
     var up = metrics ? metrics.uptime_secs : null;
     if (up == null && status.started_at && status.started_at.secs_since_epoch != null) {
       up = Math.max(0, Math.floor(Date.now() / 1000 - status.started_at.secs_since_epoch));
@@ -254,7 +254,7 @@
       setChip(el("reach"), "live", "chip-ok");
       document.body.classList.remove("stale");
     } else {
-      // 保留上次成功数据,只标记不可达并变灰。
+      // 保留上次成功数据，只标记不可达并变灰。
       setChip(el("reach"), "agent unreachable", "chip-crit");
       document.body.classList.add("stale");
     }

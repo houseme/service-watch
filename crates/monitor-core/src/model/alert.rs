@@ -1,7 +1,7 @@
 //! 告警事件模型与 incident key(DESIGN.md §7.2)。
 //!
 //! 关键不变量:`incident = hash(target, check)`,**不含 severity/reason**——
-//! 升级(Warning→Critical)不产生“第二起事故”,reason 漂移不产生新 fingerprint。
+//! 升级 (Warning→Critical) 不产生“第二起事故”,reason 漂移不产生新 fingerprint。
 
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
@@ -17,11 +17,11 @@ pub enum Severity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Category {
-    /// 新 incident 首次通知(Warning 或直接 Critical)。
+    /// 新 incident 首次通知 (Warning 或直接 Critical)。
     Alert,
     /// Warning → Critical 升级。
     Escalate,
-    /// incident 恢复(引用原 incident;仅当曾发过通知时产生)。
+    /// incident 恢复 (引用原 incident;仅当曾发过通知时产生)。
     Resolve,
     /// flap 抑制摘要。
     Flap,
@@ -45,7 +45,7 @@ pub struct AlertEvent {
 }
 
 impl AlertEvent {
-    /// 结构化日志字段名约定(DESIGN.md §10)。
+    /// 结构化日志字段名约定 (DESIGN.md §10)。
     pub fn incident_key(target: &str, check: &str) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         target.hash(&mut h);

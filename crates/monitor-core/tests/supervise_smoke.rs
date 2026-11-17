@@ -1,5 +1,5 @@
-//! supervise 真进程冒烟测试(DESIGN §11.3,EXECUTION 阶段 3 验收的自动化固化)。
-//! Unix 专用(/bin/sleep、kill -9);Windows runner 由 cfg 门排除。
+//! supervise 真进程冒烟测试 (DESIGN §11.3,EXECUTION 阶段 3 验收的自动化固化)。
+//! Unix 专用 (/bin/sleep、kill -9);Windows runner 由 cfg 门排除。
 //!
 //! 覆盖:① 冷启动 spawn + /status 身份;② kill -9 → 确定性死亡 → 自动拉活;
 //! ③ crash loop(/bin/false)→ 预算耗尽 → Fatal 闩锁。
@@ -21,7 +21,7 @@ struct Harness {
     status_rx: watch::Receiver<Arc<StatusReport>>,
     _journal_dir: tempfile_guard::TempDir,
     task: tokio::task::JoinHandle<()>,
-    /// 控制命令出口(F20 级联测试注入 restart;既有测试未用即自然丢弃)。
+    /// 控制命令出口 (F20 级联测试注入 restart;既有测试未用即自然丢弃)。
     cmd_tx: tokio::sync::mpsc::Sender<monitor_core::model::control::ControlCommand>,
 }
 
@@ -173,7 +173,7 @@ async fn cold_start_spawns_and_reports_identity() {
     h.task.abort();
 }
 
-/// ② kill -9 → 确定性死亡 → backoff 后自动拉活(新 pid)+ RESTARTS=1。
+/// ② kill -9 → 确定性死亡 → backoff 后自动拉活 (新 pid)+ RESTARTS=1。
 #[tokio::test(flavor = "multi_thread")]
 async fn kill9_child_is_restarted() {
     let mut h = spawn_agent(vec![service_cfg("sleeper", "/bin/sleep", &["30"], 5)]).await;
@@ -185,7 +185,7 @@ async fn kill9_child_is_restarted() {
     .await;
     let first_pid = h.status_rx.borrow().targets[0].identity.unwrap().pid.0;
 
-    // 模拟外部 kill -9(确定性死亡,不经 agent)
+    // 模拟外部 kill -9(确定性死亡，不经 agent)
     unsafe { libc_kill(first_pid) };
 
     let report = wait_for(&mut h.status_rx, Duration::from_secs(10), |r| {
@@ -225,7 +225,7 @@ async fn crash_loop_latches_fatal() {
 #[tokio::test(flavor = "multi_thread")]
 async fn control_restart_does_not_kill_new_process() {
     // service_cfg 自带 stop_grace=2s:kill → 自动拉活;若对运行中服务做
-    // control restart,deadline(≈2s)到期时新进程已在跑 —— 旧 bug 在此强杀新进程。
+    // control restart,deadline(≈2s) 到期时新进程已在跑 —— 旧 bug 在此强杀新进程。
     let mut h = spawn_agent(vec![service_cfg("sleeper", "/bin/sleep", &["30"], 5)]).await;
     wait_for(&mut h.status_rx, Duration::from_secs(10), |r| {
         r.targets
@@ -236,7 +236,7 @@ async fn control_restart_does_not_kill_new_process() {
     let first_pid = h.status_rx.borrow().targets[0].identity.unwrap().pid.0;
     unsafe { libc::kill(first_pid as i32, libc::SIGKILL) };
 
-    // 等待自动拉活(P0-2 场景的前半段)
+    // 等待自动拉活 (P0-2 场景的前半段)
     let report = wait_for(&mut h.status_rx, Duration::from_secs(10), |r| {
         r.targets
             .iter()
@@ -245,7 +245,7 @@ async fn control_restart_does_not_kill_new_process() {
     .await;
     let second_pid = report.targets[0].identity.unwrap().pid.0;
 
-    // 新进程存活超过 stop_grace(2s)+ 余量:若旧 bug 存在,此窗口内被强杀
+    // 新进程存活超过 stop_grace(2s)+ 余量：若旧 bug 存在，此窗口内被强杀
     tokio::time::sleep(Duration::from_secs(6)).await;
     let alive = h
         .status_rx
@@ -255,13 +255,13 @@ async fn control_restart_does_not_kill_new_process() {
         .any(|t| t.name == "sleeper" && t.identity.is_some_and(|i| i.pid.0 == second_pid));
     assert!(
         alive,
-        "新进程必须跨过 stop_grace deadline 存活(不得被残留兜底强杀)"
+        "新进程必须跨过 stop_grace deadline 存活 (不得被残留兜底强杀)"
     );
     h.task.abort();
 }
 
-/// ⑤ F20 级联闭环(真实进程):restart db → api 计划内停止(**不计 api 预算**)
-/// → db 回 Running → api 被拉回(新 pid)且跨过 stop_grace 存活。
+/// ⑤ F20 级联闭环 (真实进程):restart db → api 计划内停止 (**不计 api 预算**)
+/// → db 回 Running → api 被拉回 (新 pid) 且跨过 stop_grace 存活。
 #[tokio::test(flavor = "multi_thread")]
 async fn control_restart_cascades_stop_and_pullback() {
     let mut h = spawn_agent(vec![service_cfg("db", "/bin/sleep", &["30"], 5), {
@@ -305,7 +305,7 @@ async fn control_restart_cascades_stop_and_pullback() {
         .pid
         .0;
 
-    // 经控制通道注入 restart db(真实 F20 路径:级联停 api → db 重启 → 拉回 api)
+    // 经控制通道注入 restart db(真实 F20 路径：级联停 api → db 重启 → 拉回 api)
     h.cmd_tx
         .send(monitor_core::model::control::ControlCommand::Restart {
             target: "db".into(),
@@ -323,14 +323,14 @@ async fn control_restart_cascades_stop_and_pullback() {
     .await;
     let api_new = report.targets.iter().find(|t| t.name == "api").unwrap();
     let db_new = report.targets.iter().find(|t| t.name == "db").unwrap();
-    // 预算语义锁定(第六轮 P3):计划内级联停止**不计 api 预算**(初始 spawn 与
+    // 预算语义锁定 (第六轮 P3):计划内级联停止**不计 api 预算**(初始 spawn 与
     // 拉回也非自动重启)→ 0;db 的确定性死亡计 1。
     assert_eq!(
         api_new.restarts_in_window, 0,
         "计划内停止/拉回不计 api 预算"
     );
     assert_eq!(db_new.restarts_in_window, 1, "db 确定性死亡计入预算");
-    // api 跨过 stop_grace(2s)存活拉回后的稳定期
+    // api 跨过 stop_grace(2s) 存活拉回后的稳定期
     tokio::time::sleep(Duration::from_secs(3)).await;
     let api_alive = h.status_rx.borrow().targets.iter().any(|t| {
         t.name == "api"
@@ -341,7 +341,7 @@ async fn control_restart_cascades_stop_and_pullback() {
     h.task.abort();
 }
 
-/// kill -9(测试内联,避免引入 nix crate)。
+/// kill -9(测试内联，避免引入 nix crate)。
 unsafe fn libc_kill(pid: u32) {
     unsafe { libc::kill(pid as i32, libc::SIGKILL) };
 }

@@ -6,9 +6,16 @@ members = ["crates/monitor-core", "crates/monitor-agent", "crates/monitorctl"]
 version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
+readme = "README.md"
+authors = ["houseme <housemecn@gmail.com>", "heihutu <heihutu@gmail.com>", "zhi22915 <qiuzgang@gmail.com>"]
+repository = "https://github.com/houseme/service-watch"
+# crates.io 约束:keywords ≤ 5(小写),categories ≤ 5 且为官方合法 slug(发布强校验)
+keywords = ["monitoring", "supervisor", "process", "health-check", "metrics"]
+categories = ["development-tools", "command-line-utilities", "os", "network-programming", "hardware-support"]
 
 [workspace.dependencies]
-tokio = { version = "1", features = [
+monitor-core = { path = "crates/monitor-core", version = "0.2.0" }
+tokio = { version = "1.54.1", features = [
     "rt-multi-thread",
     "time",
     "sync",
@@ -33,8 +40,8 @@ clap = { version = "4", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 libc = "0.2"
 windows-sys = "0.61"
-# F15 Windows Service 形态(仅 monitor-agent 声明使用)。虚拟 workspace 清单不允许
-# [target.*] 节,optional 也只能在成员清单声明 —— 版本在此集中,target-gating 与
+# F15 Windows Service 形态 (仅 monitor-agent 声明使用)。虚拟 workspace 清单不允许
+# [target.*] 节，optional 也只能在成员清单声明 —— 版本在此集中，target-gating 与
 # optional 由 monitor-agent 自己的 [target.'cfg(windows)'.dependencies] 完成
 # (与 monitor-core 的 windows-sys 声明方式一致)。
 # 版本核对日期:2026-11-11(cargo search windows-service --registry crates-io → 0.8.1)。
