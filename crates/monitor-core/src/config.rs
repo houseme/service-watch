@@ -200,18 +200,27 @@ pub struct Config {
 pub struct AgentCfg {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    /// (F24, reserved) Journal rotation threshold in bytes; 0 disables rotation.
+    /// Default 10 MiB. Parsed and validated only — rotation wiring lands with F24.
+    #[serde(default = "default_journal_max_size")]
+    pub journal_max_size: u64,
 }
 
 impl Default for AgentCfg {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
+            journal_max_size: default_journal_max_size(),
         }
     }
 }
 
 fn default_data_dir() -> PathBuf {
     PathBuf::from("./data")
+}
+
+fn default_journal_max_size() -> u64 {
+    10 * 1024 * 1024
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -228,6 +237,12 @@ pub struct ControlCfg {
     pub enabled: bool,
     #[serde(default = "dur::default_listen")]
     pub listen: SocketAddr,
+    /// (F23, reserved) Optional Bearer access token; None = loopback
+    /// trust-boundary behavior unchanged. Once enforced, every endpoint except
+    /// `GET /health` requires `Authorization: Bearer <token>`. Parsed and
+    /// validated only — enforcement wiring lands with F23.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 impl Default for ControlCfg {
@@ -235,6 +250,7 @@ impl Default for ControlCfg {
         Self {
             enabled: true,
             listen: dur::default_listen(),
+            token: None,
         }
     }
 }
@@ -292,6 +308,11 @@ pub struct AlertCfg {
     pub flap_threshold: u32,
     #[serde(default, deserialize_with = "opt_url_from_str")]
     pub deadman_url: Option<url::Url>,
+    /// (F26, reserved) Per-target routes (sequential first-prefix match; no
+    /// match falls back to `webhook_url`). Parsed and validated only —
+    /// dispatch wiring lands with F26.
+    #[serde(default)]
+    pub routes: Vec<AlertRouteCfg>,
 }
 
 impl Default for AlertCfg {
@@ -307,8 +328,21 @@ impl Default for AlertCfg {
             flap_window: dur::default_flap_window(),
             flap_threshold: dur::default_flap_threshold(),
             deadman_url: None,
+            routes: Vec::new(),
         }
     }
+}
+
+/// (F26, reserved) Single alert route. `match` is a target-name prefix;
+/// `*` matches all targets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlertRouteCfg {
+    pub r#match: String,
+    #[serde(deserialize_with = "url_from_str")]
+    pub url: url::Url,
+    #[serde(default)]
+    pub format: WebhookFormat,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,6 +382,14 @@ where
             .map(Some)
             .map_err(serde::de::Error::custom),
     }
+}
+
+fn url_from_str<'de, D>(d: D) -> std::result::Result<url::Url, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: String = String::deserialize(d)?;
+    url::Url::parse(&s).map_err(serde::de::Error::custom)
 }
 
 // ---------------------------------------------------------------------------
@@ -847,6 +889,16 @@ impl Config {
         if self.agent.data_dir.as_os_str().is_empty() {
             say(&mut errs, "agent: data_dir is blank".into());
         }
+        if self
+            .control
+            .token
+            .as_ref()
+            .is_some_and(|t| t.trim().is_empty())
+        {
+            // F23: a blank token either locks everyone out or is a no-op —
+            // both are configuration errors.
+            say(&mut errs, "control: token must not be blank".into());
+        }
         if self.alert.failure_threshold == 0
             || self.alert.success_threshold == 0
             || self.alert.flap_threshold == 0
@@ -875,6 +927,20 @@ impl Config {
                 &mut errs,
                 "alert: webhook_url scheme must be http/https".into(),
             );
+        }
+        for route in &self.alert.routes {
+            if route.r#match.trim().is_empty() {
+                say(&mut errs, "alert: routes.match must not be blank".into());
+            }
+            if !matches!(route.url.scheme(), "http" | "https") {
+                say(
+                    &mut errs,
+                    format!(
+                        "alert: routes.url scheme must be http/https (match={:?})",
+                        route.r#match
+                    ),
+                );
+            }
         }
         if self.collect.interval < Duration::from_millis(100) {
             say(
@@ -1040,6 +1106,11 @@ mod tests {
             "[alert]\nfailure_threshold = 0",
             "[alert]\nsuccess_threshold = 0",
             "[alert]\nflap_threshold = 0",
+            "[alert]\nretries = 101",
+            "[[watch]]\nname='w'\npidfile=''",
+            "[control]\ntoken = ' '",
+            "[alert]\n[[alert.routes]]\nmatch = 'edge'\nurl = 'ftp://ep/hook'",
+            "[alert]\n[[alert.routes]]\nmatch = ' '\nurl = 'http://ep/hook'",
             "[[service]]\nname='app'\ncommand='app'\n[service.activate]\ncommand='hook'\nurl='http://localhost/hook'",
             "[[service]]\nname='app'\ncommand='app'\n[service.activate]\ncommand=' '",
             "[[service]]\nname='app'\ncommand='app'\n[service.activate]\nurl='ftp://localhost/hook'",
@@ -1047,6 +1118,26 @@ mod tests {
         ] {
             assert!(Config::from_toml_str(source).is_err(), "{source}");
         }
+    }
+
+    #[test]
+    fn parses_v04_optional_fields_with_defaults() {
+        // Defaults = backward compatible (F23/F24/F26 all disabled or empty)
+        let cfg = Config::from_toml_str("").unwrap();
+        assert_eq!(cfg.agent.journal_max_size, 10 * 1024 * 1024);
+        assert_eq!(cfg.control.token, None);
+        assert!(cfg.alert.routes.is_empty());
+
+        let cfg = Config::from_toml_str(
+            "[control]\ntoken = 'secret'\n[agent]\njournal_max_size = 0\n\
+             [alert]\n[[alert.routes]]\nmatch = 'edge-*'\nurl = 'http://ep/hook'\nformat = 'slack'",
+        )
+        .unwrap();
+        assert_eq!(cfg.control.token.as_deref(), Some("secret"));
+        assert_eq!(cfg.agent.journal_max_size, 0);
+        assert_eq!(cfg.alert.routes.len(), 1);
+        assert_eq!(cfg.alert.routes[0].r#match, "edge-*");
+        assert!(matches!(cfg.alert.routes[0].format, WebhookFormat::Slack));
     }
 
     #[test]

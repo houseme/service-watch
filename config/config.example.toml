@@ -1,45 +1,54 @@
-# service-watch 配置示例 — 与 DESIGN.md §4 schema 一一对应 (2026-11-10)
-# 校验:monitor-agent --check-config <本文件>
+# service-watch configuration reference — maps 1:1 to the DESIGN.md §4 schema (2026-11-10)
+# Validate with: monitor-agent --check-config <this file>
 
 [agent]
-data_dir = "./data"                       # journal 目录 (incident/重启事件/Fatal 闩锁)
+data_dir = "./data"                       # journal directory (incidents / restart events / Fatal latch)
+journal_max_size = 10485760               # journal rotation threshold in bytes (default 10 MiB; 0 = disable rotation; keeps a single journal.1.jsonl generation) — F24, reserved: parsed & validated only, rotation wiring pending
 
 [log]
-json = false                              # true = 结构化 JSON 日志
+json = false                              # true = structured JSON logs
 
-[control]                                 # 控制平面 (monitorctl 依赖它)
+[control]                                 # control plane (monitorctl depends on it)
 enabled = true
-listen = "127.0.0.1:9170"                 # 仅回环;改非回环需自行承担风险
+listen = "127.0.0.1:9170"                 # loopback only; switching to a non-loopback address is at your own risk
+# token = "change-me"                     # optional Bearer token — F23, reserved: parsed & validated only, enforcement pending; once enforced every endpoint except /health requires Authorization, and monitorctl takes --token or SERVICE_WATCH_TOKEN
 
 [collect]
-interval = "5s"                           # 全局采集间隔 (硬件/进程快照)
+interval = "5s"                           # global collection interval (hardware/process snapshot)
 
 [alert]
-webhook_url = ""                          # 空 = 不投递 (事件仍入 journal/日志)
-webhook_format = "json"                   # json = AlertEvent 原样;slack = {"text": 摘要}
-timeout = "10s"                           # 单次投递超时
-retries = 3                               # 指数退避重试 (1s 起步 ×2，封顶 10s)
-renotify_interval = "15m"                 # 同 incident 持续期重复通知间隔
-failure_threshold = 3                     # 连续失败 → Critical
-success_threshold = 2                     # 连续成功 → 恢复 (Resolve)
-flap_window = "30m"                       # flap 检测窗口
-flap_threshold = 5                        # 窗口内 open/close 达到即抑制
-deadman_url = ""                          # 可选心跳 POST;失败仅记日志
+webhook_url = ""                          # empty = no delivery (events still go to journal/logs)
+webhook_format = "json"                   # json = AlertEvent as-is; slack = {"text": summary}
+timeout = "10s"                           # per-delivery timeout
+retries = 3                               # exponential-backoff retries (start 1s, x2, capped at 10s)
+renotify_interval = "15m"                 # re-notify interval while the same incident stays open
+failure_threshold = 3                     # consecutive failures -> Critical
+success_threshold = 2                     # consecutive successes -> recovery (Resolve)
+flap_window = "30m"                       # flap detection window
+flap_threshold = 5                        # open/close count within the window that triggers suppression
+deadman_url = ""                          # optional heartbeat POST; failures are logged only
 
-[metrics]                                 # 指标周期投递 (POST JSON MetricsReport;成功 = 2xx)
+# Per-target alert routing — F26, reserved: parsed & validated only, dispatch pending.
+# Sequential first-prefix match on target names; no match falls back to webhook_url above.
+# [[alert.routes]]
+# match = "edge-*"
+# url = "https://hooks.example.com/edge"
+# format = "slack"                        # json | slack
+
+[metrics]                                 # periodic metrics push (POST JSON MetricsReport; success = 2xx)
 enabled = false
-url = ""                                  # 空 = 仅 GET /metrics 暴露;单次尝试无重试，失败下轮覆盖
+url = ""                                  # empty = GET /metrics exposure only; single attempt, no retry, a failure is overwritten next round
 interval = "60s"
-timeout = "10s"                           # 单次推送超时
+timeout = "10s"                           # per-push timeout
 
-# ============ 检查目标 (仅监控告警) ============
+# ============ Check targets (monitoring + alerting only) ============
 
 [[check]]
 name = "example-http"
 kind = "http"                             # http | tcp | process
-url = "http://127.0.0.1:8080/healthz"     # http 必填
-expected_status = "200-299"               # 默认 200-299(含边界)
-interval = "10s"                          # 必须 > timeout(配置校验强制)
+url = "http://127.0.0.1:8080/healthz"     # required for http
+expected_status = "200-299"               # default 200-299 (inclusive)
+interval = "10s"                          # must be > timeout (enforced by config validation)
 timeout = "5s"
 
 # [[check]]
@@ -52,42 +61,42 @@ timeout = "5s"
 # [[check]]
 # name = "example-process"
 # kind = "process"
-# process = "my-app"                      # 已配置 service/watch 名称或 "pid:1234"
-# cpu_threshold = 90.0                    # 与 mem_threshold_mb 至少一个
+# process = "my-app"                      # configured service/watch name or "pid:1234"
+# cpu_threshold = 90.0                    # at least one of cpu_threshold / mem_threshold_mb
 # mem_threshold_mb = 1024
 # interval = "15s"
 # timeout = "5s"
 
-# ============ 监管目标 (agent 拉活) ============
+# ============ Supervised targets (agent keeps them alive) ============
 
 [[service]]
 name = "example-app"
-command = "/usr/local/bin/example-app"    # supervise 必填;禁止 daemonize 型目标
+command = "/usr/local/bin/example-app"    # required for supervise; daemonizing targets are forbidden
 args = ["--port", "8080"]
 workdir = "/srv/example"
 env = { RUST_LOG = "info" }
-# depends_on = ["db"]                     # F20 启动编排：依赖全部 Running 后才拉起
-                                          # (引用必须存在;禁止自依赖与环)
-# console = false                         # Windows:true = 以新进程组启动并允许尝试 CTRL_BREAK(不保证生效)
+# depends_on = ["db"]                     # F20 startup orchestration: start only after every dependency is Running
+                                          # (references must exist; self-dependency and cycles are forbidden)
+# console = false                         # Windows: true = start in a new process group and attempt CTRL_BREAK (not guaranteed)
 
-[service.restart]                         # 全部有默认值，可整体省略
-min_uptime = "10s"                        # 存活低于此即视为 crash loop 嫌疑
+[service.restart]                         # every field has a default; the whole section may be omitted
+min_uptime = "10s"                        # uptime below this counts as a crash-loop suspect
 backoff_initial = "1s"
 backoff_max = "60s"
-max_restarts = 5                          # 滑动窗口内最大自动重启次数
+max_restarts = 5                          # max automatic restarts within the sliding window
 restart_window = "10m"
-stop_grace = "15s"                        # graceful → 强杀升级时限
-startup_grace = "30s"                     # 预热期：失败不计入状态机
-confirmations = 2                         # 健康类失败触发恢复的确认次数
+stop_grace = "15s"                        # graceful -> force-kill escalation deadline
+startup_grace = "30s"                     # grace period: failures during it do not enter the state machine
+confirmations = 2                         # confirmations before a health failure triggers recovery
 hung_action = "restart"                   # restart | activate
 
-# [service.activate]                      # hung_action = "activate" 时必填
-# command = "/usr/local/bin/kick-app"     # command 与 url 二选一
-# timeout = "10s"                         # 激活钩子超时
-# verify_for = "30s"                      # 激活后观察期，仍失败转 Restart
+# [service.activate]                      # required when hung_action = "activate"
+# command = "/usr/local/bin/kick-app"     # command and url are mutually exclusive
+# timeout = "10s"                         # activation hook timeout
+# verify_for = "30s"                      # observation window after activation; still failing -> Restart
 
-# ============ attach 目标 (只监控，永不杀/重启) ============
+# ============ Attach targets (monitor only, never killed/restarted) ============
 
 # [[watch]]
 # name = "systemd-nginx"
-# pidfile = "/run/nginx.pid"              # 或 pid = 1234
+# pidfile = "/run/nginx.pid"              # or pid = 1234

@@ -142,6 +142,56 @@
 
 ---
 
+## v0.4.x — 可信边界与运维闭环 ◐ (2026-11-18 规划)
+
+目标：补齐 0.x 阶段的信任边界、journal 生命周期与告警路由缺口。**全部默认行为向后兼容**（不配置新字段 = 行为不变）。
+门禁：与 v0.3 相同 —— fmt / clippy -D warnings / 全测 / 两条 no-default 组合 + `scm-target` 交叉编译；文档（README / DESIGN / RUNBOOK / DEPLOYMENT / example 注释）随实现同步。
+
+### F23 控制面可选访问令牌 ☐
+
+- [ ] `[control] token = "..."`（可选，字符串）；配置后除 `GET /health` 外全部端点要求 `Authorization: Bearer <token>`，缺失或错误一律 **401**（含状态页 `GET /`）
+- [ ] `/health` 保持无鉴权（守护进程/负载均衡探活契约不变）；`/ready`、`/status`、`/metrics*`、`/v1/*` 全部受保护
+- [ ] monitorctl：`--token <TOKEN>` flag + `SERVICE_WATCH_TOKEN` 环境变量（flag 优先）；未配置 token 的 agent 忽略任何 Authorization 头（行为不变）
+- [ ] 恒定时间比较防时序侧信道；token 不落 journal/日志（校验失败审计不含 token 值）
+- [ ] 文档：README 功能边界行、DEPLOYMENT §12 信任边界、RUNBOOK 防火墙行同步"可选 Bearer 令牌"
+
+**验收**：集成测试 —— 无 token 配置时带/不带头都 200；有 token 配置时无头 401、错头 401、对头 200、`/health` 仍 200；monitorctl 端到端（env + flag）拿到 status；错误 token 的审计记录不含 token 明文。
+
+### F24 journal 体积上限与轮转 ☐
+
+- [ ] `[agent] journal_max_size`（字节，默认 10 MiB，`0` = 禁用轮转保持现状）；仅软性触发：写事件时检查当前文件超限 → 轮转
+- [ ] 轮转动作 = 当前 `journal.jsonl` 原子改名 `journal.1.jsonl`（覆盖上一代，**只保留一代**）→ 立即新建当前文件继续写 → 写一条 audit（含轮转前后字节数）
+- [ ] 重放顺序：`journal.1.jsonl` 存在时按 `journal.1 → journal.jsonl` 依次重放（Fatal 闩锁/预算/未决 SpawnIntent 跨轮转保持 —— "Fatal 跨重启保持" 契约不因轮转破洞）
+- [ ] 改名失败的降级路径：保留当前文件继续写 + WARN（不停机；体积上限是运维目标不是安全边界）
+
+**验收**：单测 —— 超限触发轮转、journal.1 生成且当前文件续写、audit 落盘、二次轮转覆盖旧 journal.1；集成级 —— Fatal 写入后轮转再重启仍 Fatal；轮转文件内的未决 SpawnIntent 仍阻塞同名冷启动；`journal_max_size = 0` 完全不轮转。
+
+### F25 incident 跨重启恢复与重通知 ☐
+
+- [ ] 重放时恢复**仍处于 open 的 incident**（journal 已有 alert/escalate、无配对 resolve 的记录），含 warning 级 trail —— 补上 F7 交付时留白的"重通知语义"（当时仅记事件不恢复状态）
+- [ ] 启动恢复的 open incident 以重放时刻为新通知窗口起点（延续"首条通知永不冷却"原则，恢复后必然至少可再告警一次）
+- [ ] flap 计数器**不**跨重启恢复（新会话 fresh 窗口，避免旧抖动史误抑制新告警）—— 偏差表记录该取舍
+- [ ] `/status` 与 `/metrics`（`checks_ok|warning|critical`）在重放后立即反映恢复的 incident；恢复后 resolve 到来正常发 Resolve 通知
+- [ ] 配对完整性：resolve 事件引用不存在的 incident（历史遗留）在重放时丢弃并计数
+
+**验收**：单测 —— 重放 open warning/critical → incident 状态恢复 + 重通知事件产出 + resolve 正常收口；配对 resolve 丢弃；集成 —— 杀 agent 再启动，`/status` 立即呈现恢复的 critical，且新一轮 Critical 能产生新通知。
+
+### F26 按目标告警路由 ☐
+
+- [ ] `[[alert.routes]]` 数组：`{ match = "<前缀或 * 通配>", url = "...", format = "slack|json" }`；按配置顺序首条匹配 target 生效
+- [ ] 无匹配回落默认 `webhook_url`（routes 与默认并存：默认 = 兜底）；路由匹配纯函数（可单测）
+- [ ] 投递语义与默认通道一致（超时/退避/队列/spool at-least-once）；spool 重放按**当前配置**重新路由
+- [ ] `[alert.routes]` 变更属非拓扑段（reload 拒绝、要求重启）—— 与 alert 段语义一致
+
+**验收**：单测 —— 顺序首匹配、通配、无匹配回落；集成 —— 双 webhook stub 各自收到对应 target 的告警、未匹配 target 落默认端点；spool 注入失败事件后重放按新配置路由。
+
+### v0.4 遗留人工项（非代码，持续跟踪）
+
+- [ ] **Windows 实机验收**（沿用 v0.2 条目）：安装、SCM stop、错误退出恢复、Job Object 演练；交叉编译只提供类型证据
+- [ ] **硬件实机覆盖**（沿用 v0.2 条目）：Linux hwmon 设备与更多 Intel/Apple Silicon 机型读数证据
+
+---
+
 ## 已知偏差记录 (实现与原设计的差异)
 
 | 原设计 | 修订 | 依据 |
