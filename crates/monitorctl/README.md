@@ -32,6 +32,7 @@ the outcome via `status` and the journal. `restart` on a Fatal target returns 40
 | Code | Meaning |
 |---|---|
 | 0 | Success |
+| 1 | Config error (`dump-snapshot --config <path>` load/validation failure) |
 | 2 | Runtime error (incl. 409 / non-2xx responses) |
 | 3 | Target not found (reserved) |
 | 4 | Agent unreachable |

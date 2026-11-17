@@ -168,7 +168,7 @@ Remove-Item -Recurse -Force C:\service-watch    # 含 journal 与日志,确认�
 | `--check-config` 报错退出 | 按报错修 config.toml;路径写正斜杠 `C:/...` 或双反斜杠 `C:\\...` |
 | 服务启动后立即停止 (退出码 1) | agent.log 见 config error → 修配置;见 "windows-service feature" → 按第 2 步重编 agent |
 | 服务反复重启 (约 5 秒一次) | 崩溃自动恢复生效中;查 agent.log 修根因 |
-| 9170 端口被占 | `netstat -ano | findstr :9170` 找占用进程释放;或改配置 `[control].listen` 后重载 |
+| 9170 端口被占 | `netstat -ano | findstr :9170` 找占用进程释放;或改配置 `[control].listen` 后重启服务(`Restart-Service` —— control 段不走热重载),并同步 `monitorctl --url` |
 | `monitorctl` 报 unreachable | 服务没起或端口不一致：`Invoke-RestMethod http://127.0.0.1:9170/health` 定位 |
 | NASM/CMake 构建报错 | 构建依赖缺失，回第 1 步确认 PATH 后重编 |
 

@@ -164,7 +164,7 @@ sudo rm /Library/LaunchDaemons/com.houseme.service-watch.plist
 | `bootstrap` 报已加载/异常 | 先 `bootout` 再 `bootstrap`;确认 plist 属主 root:wheel 权限 0644 |
 | agent 起不来，`agent.err.log` 见 config error | 按报错修 config.toml;重跑 `--check-config` |
 | 每 5 秒重启一次 | KeepAlive 在拉异常退出;`agent.err.log` 找 config error，修根因 |
-| 9170 被占 | `lsof -i :9170` 找占用进程释放;或改配置 `[control].listen` 后重载 |
+| 9170 被占 | `lsof -i :9170` 找占用进程释放;或改配置 `[control].listen` 后重启 agent(`bootout`+`bootstrap` —— control 段不走热重载),并同步 `monitorctl --url` |
 | `monitorctl` 报 unreachable | agent 没起或端口不一致：`curl -fsS http://127.0.0.1:9170/health` 定位 |
 | 合盖/休眠后没有采集 | macOS 休眠会整体暂停 agent，开机恢复;常驻监控请防休眠或用服务器形态 |
 | 温度/风扇读数为空 | 查看 `hardware.degradations` 原因;机型不支持即正常降级 |

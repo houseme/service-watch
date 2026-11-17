@@ -290,7 +290,7 @@ curl -fsS 'http://127.0.0.1:9170/metrics/history?range=300'
 
 状态页地址为 `http://127.0.0.1:9170/`，Prometheus 抓取地址为 `/metrics?format=prometheus`。`/ready` 表示调度已启动，各目标是否健康通过 `/status` 确认。[控制面与告警语义](RUNBOOK.md)
 
-restart、check、reset 返回 202 表示命令已入队，随后通过 status 和 journal 确认执行结果。Fatal 目标的 restart 返回 409，先处理故障再 reset。检查 journal 时可观察 restart、fatal、reset、reset_targets、process_identity 和 audit 事件。
+restart、check、reset 返回 202 表示命令已入队，随后通过 status 和 journal 确认执行结果。Fatal 目标的 restart 返回 409，先处理故障再 reset。检查 journal 时可观察 restart、fatal、reset、reset_targets、process_identity、spawn_intent、spawn_outcome 和 audit 事件。
 
 ## 8. 配置热重载
 
@@ -371,6 +371,6 @@ agent 成功退出码为 0，配置错误为 1，运行或关键持久化错误�
 bash docs/deploy/perf-check.sh ./target/release/monitor-agent 60
 ```
 
-该脚本用于专门的本机合成负载验收，默认占用控制端口 19190，使用独立临时数据目录。短时通过提供快速回归证据，24 小时长跑与泄漏分析仍列在 roadmap。
+该脚本用于专门的本机合成负载验收，默认占用控制端口 19190，使用独立临时数据目录。短时通过提供快速回归证据；24 小时长跑完成门（F17）已于 2026-11-17 PASS（1412 采样，CPU 均值 0.46%、RSS 稳态增长 176KB、零 ready 失败、退出码 130），可用 `bash docs/deploy/soak-24h.sh` 复验。
 
-控制面采用本机信任边界，默认监听回环地址。`[metrics]` 周期推送字段目前预留，运行指标通过 HTTP 接口读取。Windows SCM 真机验收、更多硬件机型覆盖、磁盘故障演练与启动事务窗口继续按 roadmap 跟踪。[后续计划](../ROADMAP.md)
+控制面采用本机信任边界，默认监听回环地址。`[metrics]` 周期推送已实现（v0.2）：`enabled = true` 且配置 `url` 后按 `interval` 周期 POST MetricsReport JSON，单次尝试失败即放弃、下轮覆盖，连败边沿写 journal 审计；抓取器更推荐拉模式 `GET /metrics?format=prometheus`。Windows SCM 真机验收与更多硬件机型覆盖继续按 roadmap 跟踪（存储故障演练与崩溃启动事务已于 v0.2 交付，见 ROADMAP）。[后续计划](../ROADMAP.md)

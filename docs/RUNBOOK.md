@@ -1,6 +1,6 @@
 # service-watch RUNBOOK(运维手册)
 
-> 适用版本:v0.1.x。语义以 [DESIGN.md](../DESIGN.md) 为准 (§7 检查/告警、
+> 适用版本:v0.2.x (0.x 阶段 minor=功能)。语义以 [DESIGN.md](../DESIGN.md) 为准 (§7 检查/告警、
 > §8 恢复、§9 CLI/控制平面、§10 可观测性);部署入口见
 > [docs/deploy/README.md](deploy/README.md)。
 >
@@ -43,12 +43,12 @@ monitorctl 退出码 (DESIGN §9.3):`0` 成功;`2` 运行错误 (非 2xx 响应�
 `3` 目标不存在 (保留码，见 §1.2);`4` agent 不可达 (连接失败)。脚本化巡检请
 按退出码分支，不要解析文案。
 
-### 1.2 v0.1 控制平面实现注意 (与 DESIGN §9.2 的差异，如实记录)
+### 1.2 控制平面实现注意 (与 DESIGN §9.2 的差异，如实记录)
 
 - 控制端点**入队即 202**(命令通道容量 16，满则 503 —— DESIGN §2.2 背压),
   **不校验 target 是否存在**:`restart/check/reset` 打错名字也会 `accepted`,
   无效目标由 eval 侧拒绝 (WARN 日志 + journal 审计)。操作后请以
-  `monitorctl status` / journal 确认效果，退出码 3(目标不存在) 在 v0.1 基本不会出现。
+  `monitorctl status` / journal 确认效果，退出码 3(目标不存在) 基本不会出现。
 - 「Fatal 态 restart → HTTP 409」已接线 (DESIGN §9.2,2026-11-11):control 平面
   经 status watch 判定，Fatal 目标**直接返回 409** + 提示先 reset;非 Fatal 一律
   202 入队 (eval 侧保留防御性拒绝 + journal 审计)。monitorctl 收到 409 时输出
@@ -176,6 +176,13 @@ append-only JSONL，由独立阻塞写任务处理。Restart、Fatal、Reset、�
 // 7. process_identity:孤儿对账素材，identity=null 表示旧实例已消失
 {"type":"process_identity","at":{...},"target":"my-app",
  "identity":{"pid":1234,"start_time":1731...},"verified":true}
+
+// 8. spawn_intent:spawn 前落盘的启动意图 (崩溃启动事务;config_digest 绑定定义版本)
+{"type":"spawn_intent","at":{...},"target":"my-app","config_digest":"a1b2c3d4e5f60708"}
+
+// 9. spawn_outcome:spawn 结果 (成功带身份;失败无身份且 pid 未确认)
+{"type":"spawn_outcome","at":{...},"target":"my-app",
+ "identity":{"pid":1235,"start_time":1731...},"pid_confirmed":true}
 ```
 
 ### 2.2 常用 jq 查询
@@ -265,7 +272,8 @@ jq -c . "$J" > /dev/null || echo "存在坏行,见 deploy/README.md §5.3"
 - 每笔投递带 `alert.timeout`(默认 10s) 与 `retries` 次指数退避 (1s 起步 ×2,
   封顶 10s);最终失败记 ERROR + `alert_delivery_failures` 计数。
 - 有界队列 (256) 满 → **丢最旧 + WARN 审计** + `alerts_dropped` 计数 (告警时效
-  优先于完整性;持久化补投在 v0.2 F12)。观察到 dropped 增长 = 事件生产速率
+  优先于完整性;投递失败事件的持久化补投已由 F12 落地:`{data_dir}/spool/pending.jsonl`,
+  恢复后重放,成功确认后删除,7 天过期)。观察到 dropped 增长 = 事件生产速率
   超过投递能力，先解决 webhook 端点变慢，而不是调大队列。
 - `deadman_url`(可选) 周期心跳 POST，失败仅记日志——"agent 活着但失聪 (webhook
   通道挂了)"由外部心跳监控兜底，生产建议配置。
@@ -280,6 +288,8 @@ jq -c . "$J" > /dev/null || echo "存在坏行,见 deploy/README.md §5.3"
 | `GET /ready` | 200 `{"ready":true}` | 503 `{"ready":false}` | 配置加载成功 + 调度循环已启动;**降级采集不影响 ready**(温度缺失走 Degradation，属正常降级) |
 | `GET /status` | 200 StatusReport | — | 见下 |
 | `GET /metrics` | 200 JSON | — | `?format=prometheus` 或 `Accept: text/plain` 得 Prometheus 文本 (前缀 `service_watch_`) |
+| `GET /metrics/history?range=<secs>` | 200 JSON | 400 非法 range | 缺省 300s,上限 7200s;>600 点降采样保留首尾 |
+| `GET /` | 200 text/html | — | 只读状态页 (页内 JS 每 2s 轮询 /status+/metrics) |
 
 `/status` 结构：
 
@@ -313,7 +323,8 @@ jq -c . "$J" > /dev/null || echo "存在坏行,见 deploy/README.md §5.3"
 
 Prometheus 文本 (`--prom` / `?format=prometheus`) 与 JSON 字段同名 (前缀
 `service_watch_`),唯一例外：`last_collect_at` 在文本格式中输出为
-`service_watch_last_collect_timestamp_seconds`(epoch 秒，未采集时输出 0)。
+`service_watch_last_collect_timestamp_seconds`(epoch 秒;尚未完成任何采集时该
+指标整行不输出 —— 抓取侧表现为无数据,而非 0)。
 
 运维基线告警建议：`alert_delivery_failures` 增长、`alerts_dropped` 增长、
 `probe_skipped` 持续增长、`recovery_fatal > 0`、`degradations_events` 突增、
@@ -331,7 +342,7 @@ Prometheus 文本 (`--prom` / `?format=prometheus`) 与 JSON 字段同名 (前�
 │  └─ 在跑但连不上：
 │      ├─ [control].enabled = false?         → 开启并重启 agent
 │      ├─ listen 与 monitorctl --url 不一致  → 对齐
-│      └─ 防火墙 (仅当 listen 改为非回环)    → 收回环或按需放行 (v0.1 无鉴权，慎改)
+│      └─ 防火墙 (仅当 listen 改为非回环)    → 收回环或按需放行 (默认无鉴权，慎改)
 │
 【B】check 全面 Critical
 ├─ 目标真挂了？curl / nc 直连目标;挂了 → supervise 由恢复状态机接管，attach 只告警 (设计)
@@ -372,9 +383,9 @@ Prometheus 文本 (`--prom` / `?format=prometheus`) 与 JSON 字段同名 (前�
   刷新 (DESIGN §6.2),不随全机进程数增长。
 - 在途探测上限 1 + `timeout < interval` 配置校验 ⇒ 探测不会堆积;调度退化为
   "跳过并计数"(`probe_skipped`),不会雪崩。
-- 内存:v0.1 无硬预算 (24h 长跑验证在 v0.2 F17),经验上常驻数十 MB 量级;
-  巡检关注 RSS 缓慢增长 + `/metrics` 的 `uptime_secs` 与 `state_transitions_total`
-  对照是否同步增长 (排除"重启清零"的假象)。
+- 内存:无硬预算;24h 长跑完成门 (F17) 已 PASS:RSS 稳态增长 176KB (无泄漏
+  指征),常驻数十 MB 量级;巡检关注 RSS 缓慢增长 + `/metrics` 的 `uptime_secs`
+  与 `state_transitions_total` 对照是否同步增长 (排除"重启清零"的假象)。
 
 ### 6.2 journal 增长估计
 
@@ -467,9 +478,9 @@ copy+truncate 同样存在 copy 与 truncate 之间的极小竞态窗口 (同时
 truncate 吞掉，但通常已在 copy 之前落盘的部分保留);对事件级 journal 可接受，
 要求严格不丢则改为"停 agent → 移动 → 起 agent"窗口式轮转。
 
-**Windows**:journal 与服务模式文件日志用计划任务 + 同款 copy+truncate
-PowerShell 片段;v0.1 stdout 无处落盘 (见 deploy/windows/README §6),无日志
-轮转需求。
+**Windows**:journal 与服务模式文件日志 (`<DataDir>\agent.log`) 用计划任务 +
+同款 copy+truncate PowerShell 片段;console 形态 stdout 不落盘 (见
+deploy/windows/README §6),无需轮转。
 
 
 ## 7. 孤儿对账与持久化故障

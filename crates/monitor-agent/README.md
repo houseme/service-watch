@@ -38,7 +38,11 @@ monitor-agent [FLAGS]
 | `GET /status` | Current target + health state |
 | `GET /metrics` | JSON metrics (`?format=prometheus` for Prometheus) |
 | `GET /metrics/history?range=300` | Historical metrics |
+| `POST /v1/restart/{target}` | Queue graceful restart of a supervised target (409 if Fatal) |
+| `POST /v1/check/{target}` | Force bound checks to run now |
+| `POST /v1/reset/{target}` | Clear Fatal latch + restart budget (202; outcome via journal) |
 | `POST /v1/reload` | Hot-reload check/service/watch topology |
+| `GET /` | Read-only HTML status page |
 
 Operate it with [monitorctl](https://github.com/houseme/service-watch/tree/main/crates/monitorctl).
 

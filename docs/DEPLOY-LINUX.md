@@ -168,7 +168,7 @@ sudo systemctl daemon-reload
 |---|---|
 | 服务启动失败，`journalctl` 见 config error | 按报错修 config.toml;以 svcwatch 跑 `--check-config` 确认 |
 | 反复重启后变 failed 不再拉起 | 熔断生效 (300s 内 10 次);修根因后 `sudo systemctl reset-failed service-watch` 再 start |
-| 9170 被占 | `sudo ss -ltnp | grep 9170` 找占用进程释放;或改配置 `[control].listen` 后重载 |
+| 9170 被占 | `sudo ss -ltnp | grep 9170` 找占用进程释放;或改配置 `[control].listen` 后重启 agent(`systemctl restart` —— control 段不走热重载),并同步 `monitorctl --url` |
 | `monitorctl` 报 unreachable | 服务没起或端口不一致：`curl -fsS http://127.0.0.1:9170/health` 定位 |
 | 目标应用写文件失败 | systemd 沙箱限制：目录属主给 svcwatch，并确认 unit `ReadWritePaths=` 覆盖该路径 |
 | 目标长期 attach 或等待 | 旧进程身份对账未完成，核对采集权限与进程存在性证据 |
