@@ -130,7 +130,7 @@
 - [x] **F14 配置热重载**:SIGHUP(unix)+ `POST /v1/reload`(body 可选 path);增量生效语义 = 目标拓扑增删改(check 水位保留、service 重定义删+增、解析失败整体拒绝绝不半应用、重名防御);非拓扑段变更要求重启(记审计);diff 纯函数 12 单测 + apply 层 5 单测 + 真机 E2E(增删改/坏配置拒绝/删除收割)—— 2026-11-11
 - [x] **F15 Windows Service 形态**:`windows-service` 0.8.1 feature + `--service-run` 入口(SCM 感知);`sc stop` → SERVICE_CONTROL_STOP → `request_shutdown()` 优雅停机(替代 TerminateProcess 基线);服务模式文件日志;windows target 交叉验证通过;标准构建行为不变(两形态对比见 docs/deploy/windows/README)—— 2026-11-12
 - [x] **F16 deploy 示例**:systemd unit / launchd plist / Windows 服务安装脚本(agent 自身二级守护)—— 2026-11-11 落地 `docs/deploy/` 三平台守护配置 + `docs/RUNBOOK.md`
-- [◐] **F17 性能预算验证**:`docs/deploy/perf-check.sh` 快速门已落地(合成负载实测:CPU 生命周期均值 0.37% < 2% 预算、RSS 平稳,zsh/bash 双语法校验);**24h 长跑与泄漏分析待实测**(脚本输出与判定标准已内置)
+- [x] **F17 性能预算验证**:快速门(perf-check.sh,CPU 0.37%)+ **24h 完成门 PASS**(2026-11-17:1412 采样,排除首采样 CPU 均值 0.46% < 2%,RSS 稳态增长 176KB < 20MB,零 ready 失败,SIGTERM 优雅退出 130)—— `soak-24h.sh` 教训落地:输出目录默认改持久路径(第一次 /var/tmp 被清理器抹掉)
 
 ## v0.3.x — 扩展 ☑
 
@@ -177,7 +177,7 @@
 
 ### 后续验收与扩展
 
-- [ ] **F17 完成门**。保留固定版本与配置，执行至少 24 小时性能长跑，保存 CPU、RSS、负载与退出记录，并结合泄漏分析判定。短时脚本通过仅提供快速回归证据。
+- [x] **F17 完成门**。固定版本与配置 24h 长跑完成(1412 采样,RUN3 于 ~/.local/state/sw-soak-24h/20261116-233106/):CPU 均值 0.46%、RSS 稳态增长 176KB(无泄漏指征)、零 ready 失败、exit 130。前两次运行记录:RUN1 /var/tmp 被清理器抹掉(931 采样,CPU 0.63%)、RUN2 /var/tmp 同因——教训驱动脚本默认目录改持久路径。短时脚本仍保留为快速回归门。—— 2026-11-17
 - [ ] **Windows 实机验收**。执行安装、启动、SCM stop、错误退出恢复、Job Object 与 console 事件演练，记录服务状态及 journal。交叉编译只提供类型与 feature 编译证据。
 - [x] **原生 Windows Service 目标恢复**。受 SCM 管理的目标类型(`windows_service` 配置字段,与 command 二选一):启动幂等(预查询)/ 停止 QueryStatus 确认 / force_kill 如实降级为 Stop / 无进程身份(on_scm_spawn_ok → Starting,QueryStatus 即 liveness 证据)。三值状态投影(Running/Stopped/Transitioning)—— 过渡态与查询失败不作死亡证据(第六轮评审 P1 修复:此前 is_running 抹平三值,慢启动服务被 Stop 掐死直至 Fatal)。`scm-target` feature 门控默认关(README §8);CI 覆盖交叉编译 + windows runner 测试(第六轮评审补线)。实机验收并入上方「Windows 实机验收」行。—— 2026-11-13,7 集成测试
 - [x] **崩溃启动事务**。`SpawnIntent`(spawn 前落盘确认,config_digest 绑定定义版本)+ `SpawnOutcome`;重启对账:intent 无 outcome 且 digest 匹配 → 跳过冷启动 + ERROR + Suspect(reset 解除);digest 不匹配照常冷启动。验收断言(`spawn_intent_is_awaited_and_confirmed_before_process_spawn` 等)+ `JournalState.pending_spawns` 重放 —— 实现在树且测试通过(第六轮重构时漏勾,2026-11-15 如实修正)

@@ -27,6 +27,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x
 - **原生 Windows Service 目标恢复**:`windows_service` 目标类型(ScmOps trait;QueryStatus liveness;幂等启停;force 降级如实;6 集成测试 + msvc 交叉)
 - **指标周期推送**:`[metrics].enabled/url/timeout` → 周期 POST MetricsReport(失败即放弃下轮覆盖;连败边沿 journal 审计;panic 隔离)
 - **F20 多服务编排**:`depends_on` 启动门控(FSM Running + 进程证据;Fatal 不级联)+ **停止顺序级联**(restart X → 逆拓扑先停被依赖方 → X 回 Running 后自动拉回;Fatal 跳过;全链审计)
+- **F17 完成门 PASS**:24h 长跑(1412 采样)CPU 均值 0.46% < 2% 预算、RSS 稳态增长 176KB、零 ready 失败、exit 130;soak-24h.sh 默认目录改持久路径(前两次 /var/tmp 被清理器抹掉的教训)
 - **F17 性能验证脚本**:`docs/deploy/perf-check.sh`(合成负载 CPU/RSS 度量,阈值判定 <2% 单核;实测 0.37% PASS;24h 长跑留人工)
 
 ### Fixed(第三轮系统面评审,2026-11-11 — 无 P0,14 P2 全修)
@@ -50,6 +51,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x
 - **原生 Windows Service 目标恢复**:`windows_service` 目标类型(ScmOps trait;QueryStatus liveness;幂等启停;force 降级如实;6 集成测试 + msvc 交叉)
 - **指标周期推送**:`[metrics].enabled/url/timeout` → 周期 POST MetricsReport(失败即放弃下轮覆盖;连败边沿 journal 审计;panic 隔离)
 - **F20 多服务编排**:`depends_on` 启动门控(FSM Running + 进程证据;Fatal 不级联)+ **停止顺序级联**(restart X → 逆拓扑先停被依赖方 → X 回 Running 后自动拉回;Fatal 跳过;全链审计)
+- **F17 完成门 PASS**:24h 长跑(1412 采样)CPU 均值 0.46% < 2% 预算、RSS 稳态增长 176KB、零 ready 失败、exit 130;soak-24h.sh 默认目录改持久路径(前两次 /var/tmp 被清理器抹掉的教训)
 - **F17 性能验证脚本**:`docs/deploy/perf-check.sh`(合成负载 CPU/RSS 度量,阈值判定 <2% 单核;实测 0.37% PASS;24h 长跑留人工)
 - **F12 告警 spool 落盘(at-least-once)**:投递重试耗尽的事件持久化到 `{data_dir}/spool/pending.jsonl`,启动重放 + 周期重放接力投递;7 天过期、坏行保留、批量限流(ROADMAP F12)
 - **第三轮评审修复(2 P0 + 2 P1 + 9 P2)**:
