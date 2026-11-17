@@ -1,14 +1,14 @@
 # service-watch
 
-跨平台服务与硬件监控工具，使用 Rust 2024 构建。核心逻辑位于 `monitor-core`，`monitor-agent` 运行调度与控制平面，`monitorctl` 提供查询和操作入口。
+Cross-platform service and hardware monitoring tool built with Rust 2024. Core logic lives in `monitor-core`; `monitor-agent` runs the scheduling loop and the control plane; `monitorctl` provides the query and operations CLI.
 
-- CPU、内存、磁盘、网络、温度与进程指标采集，缺失数据通过 `Option` 和机读降级原因呈现。
-- HTTP、TCP、进程指标与进程存活检查，支持 incident 去重、升级、恢复通知、flap 抑制和 webhook 重试。
-- supervise 进程恢复，包含连续确认、预热期、退避、滑动重启预算、Fatal 闩锁与依赖启动顺序。
-- 控制平面、只读 Web 状态页、Prometheus、历史指标、终端 watch 和目标拓扑热重载。
-- 可选 `collect-deep-hardware` 深度采集，提供 Linux hwmon 与 macOS AppleSMC 风扇、电压读数。
+- CPU, memory, disk, network, temperature and process metrics collection — missing data is surfaced via `Option` with machine-readable degradation reasons.
+- HTTP, TCP, process-metrics and process-liveness checks, with incident deduplication, escalation, recovery notification, flap suppression and webhook retries.
+- supervise-style process recovery: consecutive confirmations, startup grace, backoff, sliding restart budget, Fatal latch and dependency startup ordering.
+- Control plane, read-only web status page, Prometheus exposition, historical metrics, terminal watch, and hot reload of the target topology.
+- Optional `collect-deep-hardware` deep collection providing Linux hwmon and macOS AppleSMC fan and voltage readings.
 
-## 快速开始
+## Quick start
 
 ```bash
 cargo build --release -p monitor-agent -p monitorctl
@@ -16,7 +16,7 @@ cargo build --release -p monitor-agent -p monitorctl
 ./target/release/monitor-agent --dump-snapshot
 ```
 
-创建 `service-watch.toml`，将 `command` 换成实际可执行文件路径。
+Create `service-watch.toml` and replace `command` with the actual executable path:
 
 ```toml
 [agent]
@@ -34,12 +34,12 @@ interval = "10s"
 timeout = "5s"
 ```
 
-检查与 service 同名时，健康结果会参与该服务的恢复判定。独立命名的检查只提供告警。完整配置涵盖 webhook、依赖、重启策略和 attach 目标。示例中的路径需按本机部署修改。[完整配置](config/config.example.toml)
+When a check shares a name with a service, its health verdict feeds that service's recovery decisions; independently named checks provide alerting only. The full configuration covers webhooks, dependencies, restart policies and attach targets — adjust the paths in the example to your machine. [Full configuration reference](config/config.example.toml)
 
 ```bash
 ./target/release/monitor-agent --config service-watch.toml
 
-# 在另一个终端运行
+# in another terminal
 ./target/release/monitorctl status
 ./target/release/monitorctl watch --interval 2
 ./target/release/monitorctl metrics --prom
@@ -47,54 +47,55 @@ timeout = "5s"
 ./target/release/monitorctl reset my-app
 ```
 
-浏览器打开 [本机状态页](http://127.0.0.1:9170/)。Fatal 目标需要先处理故障并执行 `reset`。`restart`、`check`、`reset` 返回 202 表示命令已入队，实际结果通过 `status` 与 journal 核对。
+Open the [local status page](http://127.0.0.1:9170/) in a browser. A Fatal target requires handling the fault first and then a `reset`. `restart`, `check` and `reset` returning 202 means the command was queued; verify the outcome via `status` and the journal.
 
-## 功能边界
+## Scope & boundaries
 
-- attach 目标只监控。agent 退出时保留 supervise 子进程，重启后根据 journal 身份和新采集证据进行孤儿对账。
-- `SIGHUP` 和 `POST /v1/reload` 应用 check、service、watch 拓扑变更。其他配置段需要重启。服务重定义会等待旧实例收割后启动新实例。
-- JSON 指标位于 `/metrics`，Prometheus 格式可用 `?format=prometheus`，历史接口为 `/metrics/history?range=300`。`[metrics]` 周期推送字段目前预留。
-- webhook 失败事件写入 spool，重放在收到成功确认后删除记录，7 天过期。进程被强杀前尚未落盘的内存事件仍有丢失窗口。
-- 控制平面默认监听回环地址，当前接口使用本机信任边界。
+- Attach targets are monitored only. Supervised child processes survive agent exit; after a restart the agent reconciles orphans from journal identities plus fresh collection evidence.
+- `SIGHUP` and `POST /v1/reload` apply check, service and watch topology changes; the other config sections require a restart. Redefining a service waits for the old instance to be reaped before starting the new one.
+- JSON metrics at `/metrics`, Prometheus format via `?format=prometheus`, history at `/metrics/history?range=300`. The `[metrics]` periodic push is implemented: with `enabled = true` and a `url` configured, a MetricsReport JSON is POSTed every `interval` (single attempt, failures overwritten next round, consecutive-failure edges write a journal audit).
+- Webhook failure events are written to a spool; replayed records are deleted on confirmed success and expire after 7 days. In-memory events not yet flushed before a force kill still have a loss window.
+- The control plane listens on loopback by default; the HTTP interface relies on the local trust boundary.
 
-## 平台与可选构建
+## Platforms & optional builds
 
-| 能力 | Linux | macOS | Windows |
+| Capability | Linux | macOS | Windows |
 |---|---|---|---|
-| 基础硬件与进程采集 | sysinfo | sysinfo | sysinfo |
-| 温度 | 取决于 hwmon | 取决于机型接口 | 不可用时显式降级 |
-| 风扇、电压 | hwmon，只读 | AppleSMC，只读，按机型可用 | 显式降级 |
-| supervise 恢复 | 进程组 | 进程组 | Job Object |
-| agent 系统守护 | systemd | launchd | SCM，需 `windows-service` |
+| Basic hardware & process collection | sysinfo | sysinfo | sysinfo |
+| Temperature | hwmon-dependent | model-dependent | explicit degradation |
+| Fans, voltage | hwmon, read-only | AppleSMC, read-only, model-dependent | explicit degradation |
+| supervise recovery | process group | process group | Job Object |
+| system daemon | systemd | launchd | SCM, requires `windows-service` |
 
 ```bash
 cargo build --release -p monitor-agent -p monitorctl --features collect-deep-hardware
 cargo run -p monitor-agent --features collect-deep-hardware -- --dump-snapshot
 
-# 在 Windows 构建 SCM 服务入口
+# Build the Windows SCM service entry point
 cargo build --release -p monitor-agent --features windows-service
 ```
 
-深度采集默认关闭。传感器缺失、权限拒绝、故障与无效值均有机读降级。Linux 电压保留驱动报告的芯片引脚语义，单位转换为伏。macOS 使用常见 SMC 键并按类型过滤，电压可信范围选择为 ±100 V，不同机型可暴露不同传感器。
+Deep collection is off by default. Missing sensors, permission denials, faults and invalid values all degrade with machine-readable reasons. Linux voltage keeps the driver-reported chip-pin semantics and converts to volts. macOS uses common SMC keys filtered by type, with a ±100 V plausible voltage range; different machines expose different sensors.
 
-Windows 默认 HTTP/TLS 构建使用 rustls 与 aws-lc-rs，需要 NASM 和 CMake。本次本地验证工具链为 stable rustc 1.99.1，核对日期为 2026-11-12。版本与平台验证结果见评审记录。
+The default Windows HTTP/TLS build uses rustls with aws-lc-rs and requires NASM and CMake. Locally verified toolchain: stable rustc (1.99.1 first verified 2026-11-12, 1.100.0 re-verified 2026-11-18); treat the verification records as the source of truth. Version and platform verification results are in the review records.
 
-## 文档
+## Documentation
 
-| 文档 | 内容 |
+| Document | Contents |
 |---|---|
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | 完整部署与使用指南，覆盖配置、三平台安装、日常操作、升级和排障 |
-| [ROADMAP.md](ROADMAP.md) | 功能规范、验收条件、进度与待办 |
-| [docs/REVIEW-2026-11-12.md](docs/REVIEW-2026-11-12.md) | 多专家评审、修复与验证记录 |
-| [DESIGN.md](DESIGN.md) | 配置、所有权、状态机与平台契约 |
-| [docs/RUNBOOK.md](docs/RUNBOOK.md) | 热重载、Fatal、journal 与投递故障处置 |
-| [docs/deploy/](docs/deploy/README.md) | systemd、launchd、Windows 部署与性能脚本 |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | 开发与验证命令 |
-| [AGENT.md](AGENT.md) | 工程硬约束 |
-| [EXECUTION.md](EXECUTION.md) | 分阶段执行计划 |
-| [BENCHMARK.md](BENCHMARK.md) | 选型依据 |
+| [docs/USAGE.md](docs/USAGE.md) | Bilingual (English / 中文) usage guide: build, run, configure, operate |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Full deployment & operations guide: configuration, three-platform installation, daily ops, upgrades and troubleshooting |
+| [ROADMAP.md](ROADMAP.md) | Feature specs, acceptance criteria, progress and backlog |
+| [docs/REVIEW-2026-11-12.md](docs/REVIEW-2026-11-12.md) | Multi-expert review, fix and verification records |
+| [DESIGN.md](DESIGN.md) | Configuration, ownership, state machines and platform contracts |
+| [docs/RUNBOOK.md](docs/RUNBOOK.md) | Hot reload, Fatal, journal and delivery incident handling |
+| [docs/deploy/](docs/deploy/README.md) | systemd, launchd, Windows deployment and performance scripts |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development & verification commands |
+| [AGENT.md](AGENT.md) | Engineering hard constraints |
+| [EXECUTION.md](EXECUTION.md) | Phased execution plan |
+| [BENCHMARK.md](BENCHMARK.md) | Selection rationale |
 
-所有工作区 crate 使用 Rust 2024 和 Apache-2.0，清单省略 `rust-version`。安全恢复使用进程身份校验，agent 生命周期独立于被监控服务。
+All workspace crates use Rust 2024 and Apache-2.0, and omit `rust-version` from their manifests. Safe recovery uses process identity verification, and the agent lifecycle is independent of the monitored services.
 
 ## License
 
