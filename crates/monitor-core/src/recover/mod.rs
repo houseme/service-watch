@@ -741,7 +741,10 @@ impl RecoveryFsm {
         self.clear_recovery();
         self.backoff.reset();
         self.enter(RecoveryState::Running, now);
-        vec![self.audit(now, "activate 验证通过 (观察期内健康恢复),回 Running".into())]
+        vec![self.audit(
+            now,
+            "activate 验证通过 (观察期内健康恢复),回 Running".into(),
+        )]
     }
 
     /// 进入 Fatal 闩锁 (窗口滑过不自动恢复，仅 reset 解除，§8.2)。

@@ -2478,7 +2478,13 @@ impl Scheduler {
         let name = rt.cfg.name.clone();
         // reload 删除/重定义与级联停止叠加：本条目的计划内标记随旧实例一并作废
         // (删除路径 FSM 已随条目丢弃;重定义路径 fresh FSM 从零开始)。
+        // P2 (round 8): drop the force-kill deadline as well — once the entry
+        // is discarded its exit events are dropped via pending_reap, so nobody
+        // consumes these tables anymore; a stale expired deadline could
+        // spuriously force-kill a same-named new instance created by reload
+        // (a hit charges the restart budget and can escalate to Fatal).
         self.planned_stops.remove(&name);
+        self.planned_stop_deadlines.remove(&name);
         if let Some(activate) = &rt.activate {
             activate.abort();
         }

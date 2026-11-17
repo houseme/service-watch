@@ -827,6 +827,14 @@ impl Config {
                     format!("watch {:?}: pid / pidfile 至少一个", w.name),
                 );
             }
+            if w.pidfile.as_ref().is_some_and(|p| p.as_os_str().is_empty()) {
+                // P3 (round 8): an empty path always fails to read — the watch
+                // would never attach and would spam a WARN every cycle.
+                say(
+                    &mut errs,
+                    format!("watch {:?}: pidfile must not be an empty path", w.name),
+                );
+            }
             if w.pid == Some(0) {
                 say(
                     &mut errs,
@@ -846,6 +854,18 @@ impl Config {
             say(
                 &mut errs,
                 "alert: failure_threshold / success_threshold / flap_threshold must be >= 1".into(),
+            );
+        }
+        if self.alert.retries > 100 {
+            // P3 (round 8): an unbounded order-of-magnitude slip would pin the
+            // dispatch task on a single event's retries (100 x timeout + backoff
+            // is on the order of 20 minutes — enough to expose the config error).
+            say(
+                &mut errs,
+                format!(
+                    "alert: retries ({}) must be <= 100 (an out-of-range magnitude pins the dispatch pipeline)",
+                    self.alert.retries
+                ),
             );
         }
         if let Some(url) = &self.alert.webhook_url

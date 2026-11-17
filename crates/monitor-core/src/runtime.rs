@@ -194,10 +194,13 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
     std::fs::create_dir_all(&spool_dir).ok();
     // ---- 指标周期推送 (ROADMAP「指标周期推送」;单次启动，失败即放弃下轮覆盖)----
     #[cfg(feature = "http-client")]
-    if cfg.metrics.enabled
+    let metrics_push_task = if cfg.metrics.enabled
         && let Some(metrics_url) = cfg.metrics.url.clone()
     {
-        tokio::spawn(crate::alert::metrics_push::run_metrics_pusher(
+        // P2(第八轮):JoinHandle 必须保留 —— pusher 持有 journal_tx 克隆且
+        // POST 在途不观察 shutdown，停机须显式 abort+await 释放 sender,
+        // 否则 journal flush 窗口必然超时、队列内事件丢失。
+        let handle = tokio::spawn(crate::alert::metrics_push::run_metrics_pusher(
             metrics_url,
             cfg.metrics.interval,
             cfg.metrics.timeout,
@@ -206,7 +209,10 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
             Some(journal_tx.clone()),
         ));
         tracing::info!(interval = ?cfg.metrics.interval, "metrics push enabled");
-    }
+        Some(handle)
+    } else {
+        None
+    };
 
     #[cfg(not(feature = "http-client"))]
     if cfg.metrics.enabled {
@@ -459,6 +465,14 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
         }
         dispatch_abort.abort();
         let _ = dispatch_supervisor.await;
+    }
+
+    // P2(第八轮):指标推送任务先收口 (abort+await 释放其 journal_tx 克隆),
+    // 再关运行时侧 sender —— 否则下方 drop 不闭合通道，flush 窗口必超时。
+    #[cfg(feature = "http-client")]
+    if let Some(handle) = metrics_push_task {
+        handle.abort();
+        let _ = handle.await;
     }
 
     // 4) journal flush:eval abort 已释放其 journal_tx;关闭运行时侧 sender,

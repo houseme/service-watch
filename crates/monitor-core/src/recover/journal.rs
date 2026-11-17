@@ -1076,7 +1076,11 @@ mod tests {
         )
         .unwrap();
         let state = replay(&path);
-        assert_eq!(state.restarts["a"].len(), 1, "坏行/缺字段行均跳过，好行保留");
+        assert_eq!(
+            state.restarts["a"].len(),
+            1,
+            "bad/missing-field lines are skipped; good lines are kept"
+        );
         assert!(state.fatal.contains("a"));
         cleanup(&dir);
     }

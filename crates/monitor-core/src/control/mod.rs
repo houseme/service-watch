@@ -192,13 +192,18 @@ fn merged_metrics(shared: &ControlShared) -> MetricsReport {
     report.recovery_fatal = latest.recovery_fatal;
     // F18:环形缓冲句柄随 eval 侧报告透传 (serde skip，不进 /metrics JSON)。
     report.history = latest.history.clone();
-    // uptime:eval 的单调源优先 (墙钟回拨防护);watch 未发布 (启动瞬间) 才用墙钟。
-    let wall_uptime = shared
-        .started_at
-        .elapsed()
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    report.uptime_secs = report.uptime_secs.max(wall_uptime);
+    // uptime: prefer the eval-side monotonic source (guards against wall-clock
+    // jumps); fall back to the wall clock only while eval has not published
+    // yet (startup instant). P3 (round 8): the old max() let the inflated
+    // post-jump wall value win forever — the opposite of the "monotonic
+    // source first" intent (wall uptime is normally >= the monotonic value).
+    if report.uptime_secs == 0 {
+        report.uptime_secs = shared
+            .started_at
+            .elapsed()
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+    }
     report
 }
 
