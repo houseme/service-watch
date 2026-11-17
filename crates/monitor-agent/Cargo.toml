@@ -4,7 +4,10 @@ description = "service-watch monitoring agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-readme.workspace = true
+# Not inherited from workspace.package: an inherited relative path resolves
+# against this member dir as ../../README.md, triggering the cargo package
+# "path outside of the package" warning.
+readme = "README.md"
 authors.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs/monitor-agent"
