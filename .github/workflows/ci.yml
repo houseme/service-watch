@@ -42,7 +42,7 @@ jobs:
         os: [ ubuntu-latest, macos-15, windows-latest ]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # reqwest 0.13 的 rustls feature 绑定 aws-lc-rs(无 ring 备选):
       # Windows 构建需 NASM(汇编)+ CMake(aws-lc-sys 构建链),见 README 平台支持。

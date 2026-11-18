@@ -115,7 +115,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Compress-Archive -Path "dist/${env:pkg}" -DestinationPath "dist/${env:pkg}.zip" -Force
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.target }}
           path: |
@@ -129,7 +129,7 @@ jobs:
     permissions:
       contents: write # gh release create/upload 产物
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           merge-multiple: true
