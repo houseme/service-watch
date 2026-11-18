@@ -51,19 +51,10 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             agent_features: collect-deep-hardware
-          # macOS runner 池连续 7h+ 枯竭(latest/13/14 全部未分配)→
-          # 改为 container 交叉产出 macOS 包:ghcr 镜像自带 macOS SDK + zig
-          # (框架链接必需,SDKROOT 自动探测);feature 降级为 collect-sysinfo
-          # (HTTP 探测/webhook/metrics/deep-hardware 缺失,release notes 注明);
-          # 原生 macOS 构建待 runner 恢复后重跑补齐。
-          - os: ubuntu-latest
-            target: aarch64-apple-darwin
-            agent_features: collect-sysinfo
-            container: ghcr.io/rust-cross/cargo-zigbuild:0.19.0
-          - os: ubuntu-latest
-            target: x86_64-apple-darwin
-            agent_features: collect-sysinfo
-            container: ghcr.io/rust-cross/cargo-zigbuild:0.19.0
+          # macOS 包暂缓:runner 池连续 10h+ 枯竭;交叉链三方案
+          # (zigbuild/container+SDK13.3)均止于链接期/SDK 依赖,教训链见
+          # service-watch-review-round7 记忆 1–7 环。待 macOS runner 恢复后
+          # 恢复原生构建 job(此前版本见 git 历史 8a42bfa 之前的矩阵)。
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             agent_features: windows-service,monitor-core/scm-target,collect-deep-hardware

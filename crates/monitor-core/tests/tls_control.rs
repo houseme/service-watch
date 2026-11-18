@@ -12,6 +12,16 @@
 //!   无客户端证书 / 坏 CA 签发的客户端证书 → TLS 握手失败;坏 CA PEM →
 //!   装配期 `Err`;`reqwest::Identity::from_pem` 对 rcgen 产物可用。
 //!
+//! 信任锚统一走 `tls_certs_only`(reqwest 0.13,纯 rustls webpki 校验,仅
+//! 本测试 CA):reqwest 0.13 的 `rustls` feature 默认经
+//! rustls-platform-verifier,其 Windows 后端对 `add_root_certificate`
+//! (extra-roots 专属信任引擎)对自签 CA 不可靠 —— reqwest #2941 /
+//! rustls-platform-verifier #214(0.7.0 只修了 UNTRUSTED_ROOT 回退一种
+//! 形态)/ #216(open:extra-roots 无平台 CI 覆盖),表现为服务端证书
+//! UnknownIssuer → mTLS 探活恒败 (Windows);macOS/Linux 不受影响。本文件
+//! 不测平台信任库本身 (F32 的「默认客户端拒信」断言覆盖该语义),故测试
+//! 客户端一律绕开平台验证器,行为跨平台一致。
+//!
 //! control/mod.rs 不可写依赖 (并行开发),ControlShared 全字段 pub，测试自装配。
 
 #![cfg(all(feature = "control-http", feature = "http-client"))]
@@ -286,7 +296,11 @@ async fn tls_paths_must_be_paired() {
 /// ② 不带客户端证书(信任服务端 CA)→ TLS 握手失败(服务端要求证书,
 ///    无 HTTP 层交互);
 /// ③ 坏 CA(另一自签 CA)签发的客户端证书 → 握手失败(不可信证书拒绝);
-/// ④ 服务端对 /status 同样可达(mTLS 不改变端点语义,鉴权仍在 HTTP 层)。
+/// ④ 服务端对 /status 同样可达(mTLS 不改变端点语义,鉴权仍在 HTTP 层);
+///    --insecure + Identity 组合仍成功(P3:跳过服务端校验与携带客户端
+///    证书正交,monitorctl 实际用法);
+/// ⑤ 错误信任锚(rogue CA)→ 服务端证书校验拒绝(tls_certs_only 真实
+///    执行 webpki 校验,非跳过)。
 #[tokio::test]
 async fn mtls_client_cert_required_and_untrusted_rejected() {
     let dir = temp_dir("mtls");
@@ -298,15 +312,18 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
     let (server_cert, server_key) = issue_leaf(&dir, "server", "127.0.0.1", &issuer);
     // 客户端 leaf(SAN 任意)与坏 CA 签发的客户端 leaf。
     let (client_cert, client_key) = issue_leaf(&dir, "client", "monitorctl-client", &issuer);
-    let (_rogue_ca_pem, rogue_issuer) = test_ca();
+    let (rogue_ca_pem, rogue_issuer) = test_ca();
     let (rogue_cert, rogue_key) = issue_leaf(&dir, "rogue", "rogue-client", &rogue_issuer);
 
-    // 良性客户端:信任 CA + 客户端证书(同一构建路径 mirror monitorctl
-    // build_client:证书 + 私钥 PEM 拼接 → Identity::from_pem)。
+    // 良性客户端:信任 CA + 客户端证书(Identity 构建 mirror monitorctl:
+    // 证书 + 私钥 PEM 拼接 → Identity::from_pem)。信任锚 `tls_certs_only`
+    // (见文件头「Windows 平台验证器」注):仅本测试 CA,纯 rustls webpki
+    // 校验,跨平台一致。
+    let ca_cert = reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap();
     let mut identity_pem = std::fs::read(&client_cert).unwrap();
     identity_pem.extend_from_slice(&std::fs::read(&client_key).unwrap());
     let trusted = reqwest::Client::builder()
-        .add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap())
+        .tls_certs_only([ca_cert.clone()])
         .identity(reqwest::Identity::from_pem(&identity_pem).unwrap())
         .build()
         .unwrap();
@@ -338,8 +355,11 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
 
     // ② 无客户端证书:信任服务端 CA 但不带 Identity → 握手被服务端拒绝
     // (certificate_required alert → 连接错误;有界等待防异常路径挂死)。
+    // tls_certs_only:客户端先通过服务端证书校验,随后的失败必然来自服务端
+    // 的「要求客户端证书」拒绝 —— 断言语义在 Windows 上同样成立 (否则会被
+    // 平台验证器先拒,撞进同错误类别)。
     let anon = reqwest::Client::builder()
-        .add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap())
+        .tls_certs_only([ca_cert.clone()])
         .build()
         .unwrap();
     let attempt = tokio::time::timeout(Duration::from_secs(5), anon.get(&base).send()).await;
@@ -358,7 +378,7 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
     let mut rogue_pem = std::fs::read(&rogue_cert).unwrap();
     rogue_pem.extend_from_slice(&std::fs::read(&rogue_key).unwrap());
     let rogue = reqwest::Client::builder()
-        .add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap())
+        .tls_certs_only([ca_cert.clone()])
         .identity(reqwest::Identity::from_pem(&rogue_pem).unwrap())
         .build()
         .unwrap();
@@ -388,6 +408,28 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
         .expect("insecure+mTLS handshake must not hang")
         .expect("insecure+mTLS request must succeed");
     assert_eq!(resp.status().as_u16(), 200);
+
+    // ⑤ 信任锚真实生效:tls_certs_only 换成 rogue CA(与测试 CA 无链)→
+    // 服务端证书校验失败(连接错误)—— 证明 ① 的 200 不以「跳过校验」为
+    // 代价(平台验证器之外的自定义信任锚路径同样执行 webpki 校验)。
+    let rogue_anchor = reqwest::Client::builder()
+        .tls_certs_only([reqwest::Certificate::from_pem(rogue_ca_pem.as_bytes()).unwrap()])
+        .identity(reqwest::Identity::from_pem(&identity_pem).unwrap())
+        .build()
+        .unwrap();
+    let attempt =
+        tokio::time::timeout(Duration::from_secs(5), rogue_anchor.get(&base).send()).await;
+    match attempt {
+        Err(_) => panic!("wrong-anchor handshake hung instead of being rejected"),
+        Ok(Err(e)) => assert!(
+            e.is_connect() || e.is_request(),
+            "expected server-cert rejection with wrong trust anchor, got: {e}"
+        ),
+        Ok(Ok(resp)) => panic!(
+            "client with wrong trust anchor unexpectedly got a response: {}",
+            resp.status()
+        ),
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }

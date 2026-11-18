@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/monitor-core", "crates/monitor-agent", "crates/monitorctl"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 # readme stays per-member, not inherited from workspace.package: an inherited
@@ -17,7 +17,7 @@ keywords = ["monitoring", "supervisor", "process", "health-check", "metrics"]
 categories = ["development-tools", "command-line-utilities", "os", "network-programming", "hardware-support"]
 
 [workspace.dependencies]
-monitor-core = { path = "crates/monitor-core", version = "0.2.0" }
+monitor-core = { path = "crates/monitor-core", version = "0.3.0" }
 tokio = { version = "1.54.1", features = [
     "rt-multi-thread",
     "time",
