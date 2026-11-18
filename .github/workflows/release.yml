@@ -1,15 +1,15 @@
-# 发布构建:tag 推送触发,产出二进制压缩包并创建 GitHub Release。
+# 发布构建:tag 推送触发，产出二进制压缩包并创建 GitHub Release。
 #
 # 触发方式:
-#   1. 把根 Cargo.toml [workspace.package].version 改为目标版本(verify-tag 强制一致)
+#   1. 把根 Cargo.toml [workspace.package].version 改为目标版本 (verify-tag 强制一致)
 #   2. git tag vX.Y.Z && git push origin vX.Y.Z
 #
 # 矩阵(与 ci.yml 平台口径一致):
 #   - x86_64-unknown-linux-gnu:默认 feature + collect-deep-hardware
-#     (Linux hwmon 深度采集;发布二进制统一带上,省去用户按需重编)。
-#   - aarch64/x86_64-apple-darwin:macos-15 arm64 runner(x86_64 为交叉目标,
+#     (Linux hwmon 深度采集;发布二进制统一带上，省去用户按需重编)。
+#   - aarch64/x86_64-apple-darwin:macos-15 arm64 runner(x86_64 为交叉目标，
 #     rustup target;AppleSMC 深度采集同启)。曾因 macos-14 镜像 2026-11-02
-#     退役机队暂缓,2026-11-18 换 macos-15 恢复。
+#     退役机队暂缓，2026-11-18 换 macos-15 恢复。
 #   - x86_64-pc-windows-msvc:额外启用 windows-service(F15 agent 自身 SCM 形态)
 #     与 monitor-core/scm-target(原生 Windows Service 目标恢复);TLS 栈为
 #     rustls + aws-lc-rs(reqwest 0.13 无 ring 备选),需 NASM + CMake。
@@ -19,7 +19,7 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    tags: [ "v*" ]
 
 permissions:
   contents: read # 默认只读;release 作业按需覆写 write
@@ -30,10 +30,10 @@ env:
 jobs:
   verify-tag:
     # tag 必须与 workspace 版本一致:产物 --version 取自 Cargo.toml,
-    # 不一致时先改根 Cargo.toml 再打 tag,避免 tag 名与包内版本错位。
+    # 不一致时先改根 Cargo.toml 再打 tag，避免 tag 名与包内版本错位。
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -56,9 +56,9 @@ jobs:
             agent_features: collect-deep-hardware
           # macOS 恢复(2026-11-18):macos-14 镜像 2026-11-02 从机队退役
           # ("configuration 'macos-14-arm64-us-default' is not supported"),
-          # 暂缓期间探索的交叉链三方案(zigbuild/container+SDK)均不可行且
-          # 脚手架已删(教训勿取回,含 monitorctl 幽灵 feature 雷);runner
-          # 现役后按 fd25db5 原始口径恢复原生双 darwin 目标(macos-15 arm64,
+          # 暂缓期间探索的交叉链三方案 (zigbuild/container+SDK) 均不可行且
+          # 脚手架已删 (教训勿取回，含 monitorctl 幽灵 feature 雷);runner
+          # 现役后按 fd25db5 原始口径恢复原生双 darwin 目标 (macos-15 arm64,
           # x86_64 交叉)。核对 2026-11-18 actions/runner-images。
           - os: macos-15
             target: aarch64-apple-darwin
@@ -71,11 +71,11 @@ jobs:
             agent_features: windows-service,monitor-core/scm-target,collect-deep-hardware
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # aws-lc-sys 构建链依赖;CMake 4 移除 <3.5 兼容,需显式放行(与 ci.yml 同口径)
+      # aws-lc-sys 构建链依赖;CMake 4 移除 <3.5 兼容，需显式放行 (与 ci.yml 同口径)
       - if: runner.os == 'Windows'
         run: choco install -y nasm cmake
       - if: runner.os == 'Windows'
@@ -99,7 +99,7 @@ jobs:
             cp "${bin}/monitor-agent" "${bin}/monitorctl" "dist/${pkg}/"
             mkdir -p "dist/${pkg}/deploy"
             cp docs/deploy/systemd/service-watch.service "dist/${pkg}/deploy/"
-            # launchd plist 仅随 apple-darwin 产物分发(当前矩阵无 darwin 格,
+            # launchd plist 仅随 apple-darwin 产物分发 (当前矩阵无 darwin 格，
             # macOS 恢复后自动带回)。
             if [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
               cp docs/deploy/launchd/com.houseme.service-watch.plist "dist/${pkg}/deploy/"
