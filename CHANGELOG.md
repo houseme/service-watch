@@ -9,7 +9,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x
 
 
 
-## [Unreleased]
+## [0.3.0] — 2026-11-18
+
+v0.4-v0.8 全部功能(F23-F39)与第八~十四轮评审修复。**0.x 阶段 minor=功能**;本版含库 API 破坏性变更(见 v0.7 节注记:`run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret`),故 0.2.0 → 0.3.0。
 
 ### 2026-11-18 v0.8 功能(可操作性增强)与第十四轮评审修复
 
@@ -26,7 +28,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x
 
 ### 2026-11-18 v0.7 功能 (收尾攻坚) 与第十二轮评审修复
 
-新增 (ROADMAP v0.7，全部默认向后兼容;**注意：库 API 有破坏性变更**,发布前需 bump 0.3.0 —— `run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret`):
+新增 (ROADMAP v0.7，全部默认向后兼容;**注意：库 API 有破坏性变更**,即本版 0.2.0 → 0.3.0 的动因 —— `run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret`):
 
 - F34 指标推送 HMAC 签名：`[metrics] secret` 配置后推送附 `X-Service-Watch-Signature: sha256=<hex>`(与 F29 webhook 签名同口径);签名 helper 下沉 `alert/signature.rs`(http-client 门控共享层，hmac/sha2 随 http-client 拉入)。
 - F35 journal 查询覆盖轮转上一代：`GET /v1/journal` 当 `journal.1.jsonl` 存在时合并尾读 (gen1 在前，时间序);读失败并入 `truncated=true`(保守口径);monitorctl 零改动。

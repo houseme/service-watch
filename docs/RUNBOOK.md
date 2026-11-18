@@ -1,6 +1,6 @@
 # service-watch RUNBOOK(运维手册)
 
-> 适用版本:main 分支(0.2.0 + Unreleased,含 v0.4-v0.8 全部功能;0.x 阶段 minor=功能,发布前按 CHANGELOG v0.7 注记 bump 0.3.0)。语义以 [DESIGN.md](../DESIGN.md) 为准 (§7 检查/告警、
+> 适用版本:main 分支(0.3.0,含 v0.4-v0.8 全部功能;0.x 阶段 minor=功能)。语义以 [DESIGN.md](../DESIGN.md) 为准 (§7 检查/告警、
 > §8 恢复、§9 CLI/控制平面、§10 可观测性);部署入口见
 > [docs/deploy/README.md](deploy/README.md)。
 >
