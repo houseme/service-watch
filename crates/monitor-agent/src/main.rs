@@ -241,8 +241,11 @@ fn init_tracing_to_file(json: bool, path: &Path) -> std::io::Result<()> {
         .append(true)
         .open(path)?;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // 文件日志禁用 ANSI(SCM 演练/日志分析按纯文本 grep 字段值;
+    // pretty 格式的 ANSI 色码会让 `reason=Clean` 之类的断言失配)。
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_ansi(false)
         .with_writer(AppendFile(std::sync::Arc::new(file)));
     if json {
         builder.json().init();
