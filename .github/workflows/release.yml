@@ -106,9 +106,11 @@ jobs:
         shell: bash
         run: |
           # macOS 交叉 job(在自带 macOS SDK 的 container 内):zigbuild +
-          # --no-default-features(默认 http 系拉 aws-lc-sys,其 cc 探测在
-          # 交叉环境必败)。原生平台保留默认 features。
+          # --no-default-features。MACOSX_DEPLOYMENT_TARGET=12.0:镜像 SDK 较老,
+          # sysinfo 引用的 _kIOMainPortDefault 需 macOS 12+ IOKit 符号(否则链接期
+          # undefined symbol)。
           if [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
+            export MACOSX_DEPLOYMENT_TARGET=12.0
             cargo zigbuild --release -p monitor-agent --target ${{ matrix.target }} --no-default-features --features "${{ matrix.agent_features }}"
           else
             cargo build --release -p monitor-agent --target ${{ matrix.target }} --features "${{ matrix.agent_features }}"

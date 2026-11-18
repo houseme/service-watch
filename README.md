@@ -5,7 +5,7 @@ Cross-platform service and hardware monitoring tool built with Rust 2024. Core l
 - CPU, memory, disk, network, temperature and process metrics collection — missing data is surfaced via `Option` with machine-readable degradation reasons.
 - HTTP, TCP, process-metrics and process-liveness checks, with incident deduplication, escalation, recovery notification, flap suppression and webhook retries.
 - supervise-style process recovery: consecutive confirmations, startup grace, backoff, sliding restart budget, Fatal latch and dependency startup ordering.
-- Control plane, read-only web status page, Prometheus exposition, historical metrics, terminal watch, and hot reload of the target topology.
+- Control plane hardened for remote use: optional Bearer token, HTTPS and mTLS client certificates. Target-level alert silencing, recurring maintenance windows, journal tail query, effective-config view, webhook HMAC signing, custom delivery headers, JSONL metrics-history persistence, read-only web status page with history sparklines, Prometheus exposition, terminal watch, and hot reload of the target topology.
 - Optional `collect-deep-hardware` deep collection providing Linux hwmon and macOS AppleSMC fan and voltage readings.
 
 ## Quick start
@@ -55,7 +55,7 @@ Open the [local status page](http://127.0.0.1:9170/) in a browser. A Fatal targe
 - `SIGHUP` and `POST /v1/reload` apply check, service and watch topology changes; the other config sections require a restart. Redefining a service waits for the old instance to be reaped before starting the new one.
 - JSON metrics at `/metrics`, Prometheus format via `?format=prometheus`, history at `/metrics/history?range=300`. The `[metrics]` periodic push is implemented: with `enabled = true` and a `url` configured, a MetricsReport JSON is POSTed every `interval` (single attempt, failures overwritten next round, consecutive-failure edges write a journal audit).
 - Webhook failure events are written to a spool; replayed records are deleted on confirmed success and expire after 7 days. In-memory events not yet flushed before a force kill still have a loss window.
-- The control plane listens on loopback by default; the HTTP interface relies on the local trust boundary. An optional `[control] token` enables Bearer authentication on every endpoint except `GET /health` (monitorctl: `--token` flag or `SERVICE_WATCH_TOKEN`).
+- The control plane listens on loopback by default; the HTTP interface relies on the local trust boundary. For remote use, stack the trust layers: optional `[control] token` (Bearer on every endpoint except `GET /health`; monitorctl `--token` / `SERVICE_WATCH_TOKEN`), `[control] tls_cert/tls_key` (HTTPS) and `[control] client_ca_cert` (mTLS, monitorctl `--client-cert/--client-key`). `monitorctl silence/unsilence` suppress notifications for a target (Resolve and Fatal-latch alerts always pass); `journal` tails the journal including the rotated generation; `config` shows the effective redacted view. Webhook and metrics-push deliveries can carry custom headers (`[alert] headers` + per-route overrides) and HMAC signatures (`webhook_secret`, route-level `secret`, `[metrics] secret`); metric history can be persisted as JSONL (`[metrics] history_path`, single-generation rotation).
 
 ## Platforms & optional builds
 
@@ -87,6 +87,8 @@ The default Windows HTTP/TLS build uses rustls with aws-lc-rs and requires NASM 
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Full deployment & operations guide: configuration, three-platform installation, daily ops, upgrades and troubleshooting |
 | [ROADMAP.md](ROADMAP.md) | Feature specs, acceptance criteria, progress and backlog |
 | [docs/REVIEW-2026-11-12.md](docs/REVIEW-2026-11-12.md) | Multi-expert review, fix and verification records |
+| [docs/REVIEW-2026-11-13.md](docs/REVIEW-2026-11-13.md) | Sixth-round review and follow-ups |
+| [CHANGELOG.md](CHANGELOG.md) | Release & Unreleased change log |
 | [DESIGN.md](DESIGN.md) | Configuration, ownership, state machines and platform contracts |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Hot reload, Fatal, journal and delivery incident handling |
 | [docs/deploy/](docs/deploy/README.md) | systemd, launchd, Windows deployment and performance scripts |

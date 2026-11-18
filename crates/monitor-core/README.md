@@ -15,7 +15,7 @@ binary is the reference consumer.
 | `eval` | Check evaluation, incident lifecycle (dedup, escalation, recovery, flap suppression) |
 | `alert` | Webhook delivery with exponential-backoff retries, dead-man switch, replay spool |
 | `recover` | Supervise state machine: confirmation windows, startup grace, backoff, sliding restart budget, Fatal latch, `(pid, start_time)` identity checks, orphan reconciliation |
-| `control` | HTTP control plane (`/`, `/health`, `/ready`, `/status`, `/metrics`, `/metrics/history`, `/v1/restart|check|reset/{target}`, `/v1/reload`) + read-only status page |
+| `control` | HTTP control plane (`/`, `/health`, `/ready`, `/status`, `/metrics`, `/metrics/history`, `/v1/restart|check|reset/{target}`, `/v1/reload`, `/v1/silence/{target}` (POST/DELETE), `/v1/journal`, `/v1/config`) + read-only status page; optional TLS/mTLS |
 
 ## Feature flags
 

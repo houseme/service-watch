@@ -70,7 +70,7 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 - `sc.exe failure` 失败恢复 (见 §3);
 - 专用账户时用 `icacls` 授予 DataDir 完全控制 (需另具备"作为服务登录"权利);
 - 防火墙**默认不建规则**——控制平面只听 `127.0.0.1:9170`,回环流量不经过防火墙
-  入站过滤;将来 listen 改非回环时的参考命令见脚本注释 (注意 v0.1 控制平面无鉴权);
+  入站过滤;将来 listen 改非回环时的参考命令见脚本注释 (远程暴露时应叠加 [control] token 与 TLS/mTLS,见 RUNBOOK §1.2d/§1.2e);
 - 启动后轮询 `GET /ready` 至多 30s 并汇报。
 
 ## 3. 失败恢复动作 (sc failure)

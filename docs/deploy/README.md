@@ -26,7 +26,7 @@
 三平台共同点：
 
 - 控制平面默认仅监听 **`127.0.0.1:9170`**(config `[control].listen`),`monitorctl` 走 HTTP;
-  不建议改为非回环地址 (v0.1 控制平面无鉴权，DESIGN §4.1 明示"改非回环需自行承担风险")。
+  不建议改为非回环地址 (远程暴露时应叠加 [control] token (F23) 与 TLS/mTLS (F32/F38)，见 RUNBOOK §1.2d/§1.2e"改非回环需自行承担风险")。
 - journal 位于 `<data_dir>/journal.jsonl`,append-only,**目录对运行账户必须可写**。
 - journal 和 spool 写入 `data_dir`，服务模式日志还写入 `--log-file` 指定位置，运行账户需要相应目录权限。
 

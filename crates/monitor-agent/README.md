@@ -42,6 +42,9 @@ monitor-agent [FLAGS]
 | `POST /v1/check/{target}` | Force bound checks to run now |
 | `POST /v1/reset/{target}` | Clear Fatal latch + restart budget (202; outcome via journal) |
 | `POST /v1/reload` | Hot-reload check/service/watch topology |
+| `POST/DELETE /v1/silence/{target}` | Suppress/unsuppress notifications for a target (F27) |
+| `GET /v1/journal` | Tail query over the journal incl. rotated gen-1 (F28/F35) |
+| `GET /v1/config` | Redacted effective-config view (F33) |
 | `GET /` | Read-only HTML status page |
 
 Operate it with [monitorctl](https://github.com/houseme/service-watch/tree/main/crates/monitorctl).

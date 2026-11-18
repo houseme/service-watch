@@ -1,6 +1,6 @@
 # service-watch Usage Guide / 使用指南
 
-> Bilingual guide (English / 中文对照). Applies to v0.2.x; semantics follow
+> Bilingual guide (English / 中文对照). Applies to main branch (0.2.0 + Unreleased, incl. v0.4-v0.8; bump to 0.3.0 before release per CHANGELOG); semantics follow
 > [DESIGN.md](../DESIGN.md). For platform installation, see
 > [docs/DEPLOYMENT.md](DEPLOYMENT.md); for incident handling, see
 > [docs/RUNBOOK.md](RUNBOOK.md).

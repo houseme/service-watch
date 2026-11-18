@@ -3,7 +3,7 @@
 
 [agent]
 data_dir = "./data"                       # journal directory (incidents / restart events / Fatal latch)
-journal_max_size = 10485760               # journal rotation threshold in bytes (default 10 MiB; 0 = disable rotation; keeps a single journal.1.jsonl generation) — F24, reserved: parsed & validated only, rotation wiring pending
+journal_max_size = 10485760               # journal rotation threshold in bytes (default 10 MiB; 0 = disable rotation; keeps a single journal.1.jsonl generation) — F24 (delivered): replay reads gen-1 first
 
 [log]
 json = false                              # true = structured JSON logs

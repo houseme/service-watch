@@ -237,8 +237,9 @@ impl Default for MaintenanceCfg {
 pub struct AgentCfg {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
-    /// (F24, reserved) Journal rotation threshold in bytes; 0 disables rotation.
-    /// Default 10 MiB. Parsed and validated only — rotation wiring lands with F24.
+    /// F24 (delivered): journal rotation threshold in bytes; 0 disables
+    /// rotation. Default 10 MiB. Wiring: the tracked writer measures the file
+    /// after each write and rotates to a single `journal.1.jsonl` generation.
     #[serde(default = "default_journal_max_size")]
     pub journal_max_size: u64,
 }
@@ -1016,6 +1017,24 @@ impl Config {
         // CR/LF/控制字符(header 注入),空名/空值拒绝。
         let is_tchar = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
         let mut check_headers = |where_: &str, hs: &BTreeMap<String, String>| {
+            // P3(第十六轮):HeaderName 线上归一为小写 —— 大小写变体是同一头;
+            // 合并前不折叠会产生"全局 Authorization + 路由 authorization"同名双头
+            // 穿透到线上。BTreeMap 键序下同折叠键的变体必相邻,检出即拒。
+            let mut fold: std::collections::HashMap<String, &String> =
+                std::collections::HashMap::new();
+            for k in hs.keys() {
+                let lk = k.to_ascii_lowercase();
+                if let Some(prev) = fold.get(&lk) {
+                    say(
+                        &mut errs,
+                        format!(
+                            "{where_}: header name {prev:?} / {k:?} 仅大小写不同 —— HTTP 头名不区分大小写,会发出同名双头"
+                        ),
+                    );
+                } else {
+                    fold.insert(lk, k);
+                }
+            }
             for (k, v) in hs {
                 if k.is_empty() || !k.chars().all(is_tchar) {
                     say(
@@ -1039,11 +1058,33 @@ impl Config {
             }
         };
         check_headers("alert.headers", &self.alert.headers);
+        // P3(第十六轮):跨表折叠冲突 —— 路由头与全局头大小写变体合并后
+        // 同名双头,与表内变体同样拒绝。
+        let global_fold: std::collections::BTreeSet<String> = self
+            .alert
+            .headers
+            .keys()
+            .map(|k| k.to_ascii_lowercase())
+            .collect();
+        // 先收集跨表冲突,再统一 say(check_headers 闭包持有 &mut errs,循环内
+        // 直接调用会 double borrow)。
+        let mut cross_conflicts: Vec<String> = Vec::new();
         for route in &self.alert.routes {
             check_headers(
                 &format!("alert: routes.headers (match={:?})", route.r#match),
                 &route.headers,
             );
+            for k in route.headers.keys() {
+                if global_fold.contains(&k.to_ascii_lowercase()) {
+                    cross_conflicts.push(format!(
+                        "alert: routes.header {k:?} (match={:?}) 与全局 headers 仅大小写不同 —— 合并会产生同名双头",
+                        route.r#match
+                    ));
+                }
+            }
+        }
+        for msg in cross_conflicts {
+            say(&mut errs, msg);
         }
         // F38:mTLS 必须建立在 TLS 之上
         if self.control.client_ca_cert.is_some() && self.control.tls_cert.is_none() {
@@ -1061,6 +1102,29 @@ impl Config {
             .is_some_and(|p| p.as_os_str().is_empty())
         {
             say(&mut errs, "metrics: history_path 不能为空路径".into());
+        }
+        // P3(第十六轮):与 journal/spool 系统文件碰撞守卫 —— 双写互踩会同时
+        // 破坏恢复域(journal 重放遇 history 行当坏行)与观测域,且两套轮转器
+        // 互踩(Windows 下持 fd 使对方 rename 失败)。junction 规避也不能逃过
+        // 规范化路径比对。
+        if let Some(hp) = &self.metrics.history_path {
+            let hp_norm = std::fs::canonicalize(hp).unwrap_or_else(|_| hp.clone());
+            let journal = self.agent.data_dir.join("journal.jsonl");
+            let journal_gen1 = crate::recover::journal::gen1_path(&journal);
+            let spool = self.agent.data_dir.join("spool/pending.jsonl");
+            for (label, reserved) in [
+                ("journal.jsonl", journal),
+                ("journal.1.jsonl", journal_gen1),
+                ("spool/pending.jsonl", spool),
+            ] {
+                let r_norm = std::fs::canonicalize(&reserved).unwrap_or_else(|_| reserved.clone());
+                if hp_norm == r_norm {
+                    say(
+                        &mut errs,
+                        format!("metrics: history_path 不得与系统文件 {label} 相同 (双写互踩)"),
+                    );
+                }
+            }
         }
         if self.alert.failure_threshold == 0
             || self.alert.success_threshold == 0
@@ -1347,6 +1411,8 @@ mod tests {
             "[alert]\nheaders = { 'X-Auth' = '' }",
             "[alert]\nheaders = { 'Bad Header' = 'v' }",
             "[alert]\nheaders = { 'X-Inj' = \"line1\\nline2\" }",
+            "[alert]\nheaders = { 'X-A' = '1' }\n[[alert.routes]]\nmatch = '*'\nurl = 'http://e/h'\nheaders = { 'x-a' = '2' }",
+            "[metrics]\nhistory_path = './data/journal.jsonl'",
             "[control]\nclient_ca_cert = 'ca.pem'",
             "[metrics]\nhistory_path = ''",
             "[[maintenance]]\ntargets = []\nstart_utc = '02:00'",
