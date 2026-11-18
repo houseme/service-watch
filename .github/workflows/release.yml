@@ -4,9 +4,12 @@
 #   1. 把根 Cargo.toml [workspace.package].version 改为目标版本(verify-tag 强制一致)
 #   2. git tag vX.Y.Z && git push origin vX.Y.Z
 #
-# 矩阵(与 ci.yml 平台口径一致;macOS 两平台暂缓,见矩阵内注释):
+# 矩阵(与 ci.yml 平台口径一致):
 #   - x86_64-unknown-linux-gnu:默认 feature + collect-deep-hardware
 #     (Linux hwmon 深度采集;发布二进制统一带上,省去用户按需重编)。
+#   - aarch64/x86_64-apple-darwin:macos-15 arm64 runner(x86_64 为交叉目标,
+#     rustup target;AppleSMC 深度采集同启)。曾因 macos-14 镜像 2026-11-02
+#     退役机队暂缓,2026-11-18 换 macos-15 恢复。
 #   - x86_64-pc-windows-msvc:额外启用 windows-service(F15 agent 自身 SCM 形态)
 #     与 monitor-core/scm-target(原生 Windows Service 目标恢复);TLS 栈为
 #     rustls + aws-lc-rs(reqwest 0.13 无 ring 备选),需 NASM + CMake。
@@ -51,15 +54,18 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             agent_features: collect-deep-hardware
-          # macOS 包暂缓:runner 池连续 10h+ 枯竭;交叉链三方案
-          # (zigbuild/container+SDK13.3)均止于链接期/SDK 依赖,教训链见
-          # service-watch-review-round7 记忆 1–7 环。待 macOS runner 恢复后
-          # 恢复原生构建 job(此前版本见 git 历史 8a42bfa 之前的矩阵)。
-          # 恢复注意(第十七轮 P2 教训,交叉脚手架已删、勿原样取回):
-          #   - 历史交叉分支里 monitorctl 构建带 `--features collect-sysinfo`
-          #     是幽灵 feature(monitorctl 无此 feature,cargo 直接报错);
-          #   - 第三方 SDK 下载(joseluisq/macosx-sdks)恢复时须加 sha256
-          #     校验后再解包(供应链)。
+          # macOS 恢复(2026-11-18):macos-14 镜像 2026-11-02 从机队退役
+          # ("configuration 'macos-14-arm64-us-default' is not supported"),
+          # 暂缓期间探索的交叉链三方案(zigbuild/container+SDK)均不可行且
+          # 脚手架已删(教训勿取回,含 monitorctl 幽灵 feature 雷);runner
+          # 现役后按 fd25db5 原始口径恢复原生双 darwin 目标(macos-15 arm64,
+          # x86_64 交叉)。核对 2026-11-18 actions/runner-images。
+          - os: macos-15
+            target: aarch64-apple-darwin
+            agent_features: collect-deep-hardware
+          - os: macos-15
+            target: x86_64-apple-darwin
+            agent_features: collect-deep-hardware
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             agent_features: windows-service,monitor-core/scm-target,collect-deep-hardware

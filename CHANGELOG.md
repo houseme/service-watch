@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x 阶段 minor=功能，y.z=修复。
 
+## [Unreleased]
+
+### 2026-11-18 macOS runner 恢复(macos-14 镜像退役换 macos-15)
+
+- ci.yml test 矩阵 `macos-14` → `macos-15`:macos-14 镜像 2026-11-02 从 GitHub Actions 机队退役(报 `configuration 'macos-14-arm64-us-default' is not supported`;此前「runner 池枯竭」即退役过渡期表现)。
+- release.yml 恢复 darwin 双目标原生构建矩阵(macos-15 arm64 runner,x86_64-apple-darwin 交叉,按暂缓前的原始口径)—— macOS 发布资产自下一 tag 起恢复。
+
 ## [0.3.0] — 2026-11-18
 
 v0.4-v0.8 全部功能(F23-F39)与第八~十六轮评审修复(第十五/十六轮:F37 头名折叠/跨表校验、history/journal/spool 路径碰撞守卫、文档全面对坑等,均已随本版交付)。**0.x 阶段 minor=功能**;本版含库 API 破坏性变更(见 v0.7 节注记:`run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret` 与第 5 参 `headers`),故 0.2.0 → 0.3.0。

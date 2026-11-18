@@ -36,7 +36,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        # macos-14 镜像 2026-11-02 从 GitHub Actions 机队退役
+        # ("configuration 'macos-14-arm64-us-default' is not supported"),
+        # arm64 腿换现役 macos-15(核对 2026-11-18 actions/runner-images)。
+        os: [ubuntu-latest, macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
