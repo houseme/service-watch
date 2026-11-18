@@ -11,6 +11,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x
 
 ## [Unreleased]
 
+### 2026-11-18 v0.8 功能(可操作性增强)与第十四轮评审修复
+
+新增(ROADMAP v0.8,全部默认向后兼容):
+
+- F37 webhook 自定义投递头:`[alert] headers`(全局)+ 路由级 `headers`(同名覆盖全局,签名头独立共存);RFC 7230 token 名 + 可见 ASCII 值校验(与 http crate 字节规则对齐);线上头名小写。
+- F38 控制面 mTLS:`[control] client_ca_cert`(可选)配置后 TLS 握手强制客户端证书(严格 CA 解析);monitorctl `--client-cert/--client-key`(成对);与 `--insecure`/`--token` 正交可叠加。rustls 0.23 直接声明(不新增编译单元,feature 并集与现状一致)。
+- F39 指标历史持久化:`[metrics] history_path`(可选)—— 每样本 JSONL 追加落盘(行 = /metrics/history 单样本对象),10 MiB 单代轮转,重启追加,崩溃残行定界;不做重放/查询(纯数据出口)。
+
+修复(第十四轮双专家验证):
+
+- [P2] header 值校验漏非 ASCII(is_control 不覆盖 ≥ U+00A0,"café" 通过 config 但被构造期丢弃 → 接收方缺头 401)→ 值校验对齐 http crate 字节规则。
+- [P3] 历史文件打开时半行定界(爆炸半径 2 行 → 1 行);mTLS 握手拒绝测试区分超时与 TLS alert;--insecure+mTLS 组合测试补齐;CA 解析注释如实化(非证书段静默跳过);F37 线上头名小写/保留头警示;F39 时间源措辞如实化;交叉引用修正(§1.2e/§1.2f)。
+
 ### 2026-11-18 v0.7 功能 (收尾攻坚) 与第十二轮评审修复
 
 新增 (ROADMAP v0.7，全部默认向后兼容;**注意：库 API 有破坏性变更**,发布前需 bump 0.3.0 —— `run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret`):

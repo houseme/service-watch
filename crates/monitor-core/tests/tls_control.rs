@@ -343,10 +343,16 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
         .build()
         .unwrap();
     let attempt = tokio::time::timeout(Duration::from_secs(5), anon.get(&base).send()).await;
-    assert!(
-        attempt.is_err() || attempt.unwrap().is_err(),
-        "client without certificate must fail the TLS handshake"
-    );
+    // P3(第十四轮验证):区分超时与 TLS 拒绝 —— 服务器把无证书连接挂死
+    // 而非发 alert 的回归不得假绿(timeout err 不通过)。
+    match attempt {
+        Err(_) => panic!("handshake hung instead of being rejected with a TLS alert"),
+        Ok(Err(e)) => assert!(
+            e.is_connect() || e.is_request(),
+            "expected a connect/TLS-level rejection, got: {e}"
+        ),
+        Ok(Ok(resp)) => panic!("anon client unexpectedly got a response: {}", resp.status()),
+    }
 
     // ③ 坏 CA 签发的客户端证书:另一自签 CA 不在信任锚 → 握手拒绝
     let mut rogue_pem = std::fs::read(&rogue_cert).unwrap();
@@ -357,10 +363,31 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
         .build()
         .unwrap();
     let attempt = tokio::time::timeout(Duration::from_secs(5), rogue.get(&base).send()).await;
-    assert!(
-        attempt.is_err() || attempt.unwrap().is_err(),
-        "client certificate from an untrusted CA must fail the TLS handshake"
-    );
+    match attempt {
+        Err(_) => panic!("rogue-client handshake hung instead of being rejected"),
+        Ok(Err(e)) => assert!(
+            e.is_connect() || e.is_request(),
+            "expected a connect/TLS-level rejection, got: {e}"
+        ),
+        Ok(Ok(resp)) => panic!(
+            "rogue client unexpectedly got a response: {}",
+            resp.status()
+        ),
+    }
+
+    // ④ P3(第十四轮验证):--insecure(跳过服务端证书校验)与客户端证书
+    // 正交 —— danger_accept_invalid_certs(true) + Identity 组合必须仍携带
+    // 客户端证书并成功(自签服务端 + mTLS 场景,monitorctl 实际用法)。
+    let combo = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .identity(reqwest::Identity::from_pem(&identity_pem).unwrap())
+        .build()
+        .unwrap();
+    let resp = tokio::time::timeout(Duration::from_secs(5), combo.get(&base).send())
+        .await
+        .expect("insecure+mTLS handshake must not hang")
+        .expect("insecure+mTLS request must succeed");
+    assert_eq!(resp.status().as_u16(), 200);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

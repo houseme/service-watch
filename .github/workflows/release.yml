@@ -78,7 +78,13 @@ jobs:
       - name: build
         shell: bash
         run: |
-          cargo build --release -p monitor-agent --target ${{ matrix.target }} --features "${{ matrix.agent_features }}"
+          # macOS 交叉 job 补 --no-default-features(默认 features 的 http 系拉
+          # aws-lc-sys,Linux 交叉不可编译);原生平台保留默认 features。
+          if [ "${{ runner.os }}" = "Linux" ] && [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
+            cargo build --release -p monitor-agent --target ${{ matrix.target }} --no-default-features --features "${{ matrix.agent_features }}"
+          else
+            cargo build --release -p monitor-agent --target ${{ matrix.target }} --features "${{ matrix.agent_features }}"
+          fi
           if [ "${{ runner.os }}" = "Linux" ] && [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
             # macOS 交叉包:无 C 依赖 feature 集(deep-hardware/http 系不可交叉)
             cargo build --release -p monitorctl --target ${{ matrix.target }} --no-default-features --features collect-sysinfo

@@ -170,7 +170,7 @@ chmod 0600 client-ca-key.pem client-key.pem
   互不排斥;`--insecure` 只跳过**服务端证书校验**,不影响客户端证书要求
   (服务端仍会要求证书,mTLS 场景下 `--insecure` 不能替代证书)。
 - **加载失败早退**:CA 文件缺失/坏 PEM/无证书段 → 启动装配期退出码 2(与
-  服务端证书同列);CA 解析为严格模式,任一段失败即拒绝,不做宽容收集。
+  服务端证书同列);CA 解析为严格模式:证书段逐段校验 (add 失败即拒),非证书段静默跳过,空文件/无证书段拒绝,不做宽容收集。
 - **轮换 = 重启**:CA 与证书同列加载驻留内存;增删客户端信任、换 CA、
   换客户端证书后重启 agent 生效(control 段不走热重载)。
 - **证书有效期**:客户端证书过期后握手即失败,表现为 monitorctl 退出 4
@@ -510,6 +510,7 @@ fresh 窗口)。
   优先于完整性;投递失败事件的持久化补投已由 F12 落地：`{data_dir}/spool/pending.jsonl`,
   恢复后重放，成功确认后删除，7 天过期)。观察到 dropped 增长 = 事件生产速率
   超过投递能力，先解决 webhook 端点变慢，而不是调大队列。
+- **自定义投递头 (F37)**:`[alert] headers` 与路由级 `headers` 注入任意投递头 (接收方 auth token 等;名 = RFC 7230 token,值 = 可见 ASCII;线上头名全小写);路由级同名键覆盖全局;勿覆盖保留头 (`x-service-watch-signature`/`content-type`/`host`)。
 - **按目标路由 (F26)**:`[[alert.routes]]` 按配置顺序首条匹配 target 名称前缀
   (`match = "edge"` 命中 `edge-*`;`match = "*"` 通配全部),未命中回落默认
   `webhook_url`(routes 与默认并存，默认 = 兜底)。路由命中与否不影响超时/退避/

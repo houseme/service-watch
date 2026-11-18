@@ -32,7 +32,7 @@
 //!   journal audit**(journal 是恢复域，历史文件是观测出口，两域隔离);
 //! - 无逐行 fsync (数据可靠性 = OS 页缓存;观测数据可容忍崩溃丢尾部)。
 //!
-//! ## 运维边界 (RUNBOOK §1.2e)
+//! ## 运维边界 (RUNBOOK §1.2f)
 //! 外部 copytruncate 工具 (清零原文件) 与本 writer 兼容 (O_APPEND + 实测尺寸
 //! 判断，journal 同款);**rename 式**外部轮转无效 (writer 持 fd 续写旧 inode);
 //! 外部工具不得删除/改名 history 主文件本身。
@@ -222,15 +222,36 @@ fn rotate_and_reopen(path: &Path) -> std::io::Result<std::fs::File> {
 /// 打开历史文件 (append+create;父目录随建)。不做 journal 式半行定界 ——
 /// 单写者整行写入，只有崩溃落在 write_all 中途才可能产生残行 (模块 doc)。
 fn open_history_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
-        .open(path)
+        .open(path)?;
+    // P3(第十四轮验证):打开时半行定界(照抄 journal open_writer)——
+    // 崩溃落在 write_all 中途会留无 \n 残行,不处理则重启 append 后下一行
+    // 与残行粘死,两条样本一起失效;定界把爆炸半径压回 1 行。
+    let len = file.metadata()?.len();
+    if len > 0 {
+        file.seek(SeekFrom::Start(len - 1))?;
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            file.seek(SeekFrom::End(0))?;
+            file.write_all(b"\n")?;
+            tracing::warn!(
+                path = %path.display(),
+                "history file ended mid-line (crash during write); delimiter written"
+            );
+        }
+        file.seek(SeekFrom::End(0))?;
+    }
+    Ok(file)
 }
 
 #[cfg(test)]

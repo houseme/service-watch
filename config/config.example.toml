@@ -31,6 +31,7 @@ flap_window = "30m"                       # flap detection window
 flap_threshold = 5                        # open/close count within the window that triggers suppression
 deadman_url = ""                          # optional heartbeat POST; failures are logged only
 # webhook_secret = "change-me"            # optional HMAC-SHA256 signing key (F29): deliveries carry X-Service-Watch-Signature: sha256=<hex>; route-level `secret` overrides this per route
+# headers = { Authorization = "Bearer token-for-acceptor" }  # optional custom delivery headers (F37, RFC 7230 token names; visible-ASCII values only; names are lowercased on the wire — do not override reserved headers like content-type/host)
 
 # Per-target alert routing (F26): sequential first-prefix match on target names
 # ("*" as a whole pattern matches every target); no match falls back to webhook_url above.
@@ -39,6 +40,7 @@ deadman_url = ""                          # optional heartbeat POST; failures ar
 # url = "https://hooks.example.com/edge"
 # format = "slack"                        # json | slack
 # secret = "edge-only"                    # optional route-level signing key (F29); falls back to webhook_secret
+# headers = { X-Team = "edge" }           # optional route-level headers (F37): same-name keys override global headers
 
 # Recurring maintenance windows (F31): all times are UTC (no DST support); alerts
 # for matching targets are suppressed during the window, Resolve and Fatal-latch

@@ -1023,10 +1023,17 @@ impl Config {
                         format!("{where_}: header name {k:?} 必须是非空 RFC 7230 token"),
                     );
                 }
-                if v.is_empty() || v.chars().any(|c| c == '\r' || c == '\n' || c.is_control()) {
+                // P2(第十四轮验证):http crate 的 HeaderValue 字节规则是
+                // `b >= 32 && b != 127 || b == TAB`(≥128 一律拒)—— Rust
+                // is_control() 不覆盖 ≥ U+00A0 的非 ASCII(如 "café"),曾出现
+                // "config 通过 → 构造期 WARN 丢弃 → 接收方缺头 401" 的排查黑洞。
+                // 此处与 http crate 字节规则精确对齐:仅可见 ASCII + TAB。
+                if v.is_empty() || !v.bytes().all(|b| (b >= 32 && b != 127) || b == b'\t') {
                     say(
                         &mut errs,
-                        format!("{where_}: header {k:?} 的值不得为空或含 CR/LF/控制字符"),
+                        format!(
+                            "{where_}: header {k:?} 的值不得为空,且仅可含可见 ASCII 字符与 TAB(header 值字节规则)"
+                        ),
                     );
                 }
             }

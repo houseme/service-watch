@@ -232,8 +232,8 @@ async fn build_mtls_config(
 
 /// [`build_mtls_config`] 的阻塞实现 (spawn_blocking 内执行)。
 ///
-/// CA 证书解析为**严格模式**:逐段 `RootCertStore::add`,任一段解析失败
-/// (含非证书段混入) 即 `Err` —— 信任链配置错误宁可启动失败,不做
+/// CA 证书解析为**严格模式**:逐段 `RootCertStore::add`,证书段损坏
+/// (证书段损坏;非证书段会被静默跳过) 即 `Err` —— 信任链配置错误宁可启动失败,不做
 /// `add_parsable_certificates` 宽容收集 (静默丢根 = 拒信面扩大)。
 #[cfg(feature = "control-http")]
 fn build_mtls_config_blocking(

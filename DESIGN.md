@@ -535,7 +535,7 @@ Agent 端点：`GET /health`(浅存活)、`GET /ready`(配置加载成功 + 调�
 
 - **实现**:rustls `WebPkiClientVerifier` 严格 webpki 校验(不 `allow_untrusted`/不 `allow_unauthenticated` —— 后者会退化为「证书可选」),经 `builder_with_provider(roots, provider)` 复用与 HTTPS 同一 provider 选型(进程级 `CryptoProvider::get_default()` 优先,否则局部构造 aws-lc provider,不 `install_default`);ServerConfig 以 `with_client_cert_verifier(..).with_single_cert(..)` 手工构建后交 `RustlsConfig::from_config`(该构造不代设 ALPN,手工补齐 `h2`/`http/1.1`)。CA PEM 解析**严格模式**(任一段失败即拒绝,不做宽容收集;空文件/无证书段 → 装配期 `Err`,与 F32 坏 PEM 同列早退,退出码 2)。
 - **信任链三件套可叠加**:TLS(传输加密)、Bearer token(F23,HTTP 层)、mTLS(F38,TLS 握手层)三者**独立配置、独立叠加** —— 鉴权中间件仍在 TLS 层之后,401 语义不变;mTLS 失败的请求根本到不了 HTTP 层(不会产生 401/403)。典型组合:公网远程运维 = TLS + Bearer + mTLS 全开;本机部署 = 三者皆关(现状)。
-- **客户端**:monitorctl 全局 `--client-cert <PATH>` + `--client-key <PATH>`(**成对必填**,单边 → 启动错误) 经 `reqwest::Identity::from_pem`(reqwest 0.13 rustls 后端唯一 PEM 入口,单 buffer 收集证书段 + PKCS#8/#1/SEC1 私钥段)构建客户端身份,全部子命令共用;与 `--token` 互不排斥。证书生成与运维细则见 RUNBOOK §1.2d。
+- **客户端**:monitorctl 全局 `--client-cert <PATH>` + `--client-key <PATH>`(**成对必填**,单边 → 启动错误) 经 `reqwest::Identity::from_pem`(reqwest 0.13 rustls 后端唯一 PEM 入口,单 buffer 收集证书段 + PKCS#8/#1/SEC1 私钥段)构建客户端身份,全部子命令共用;与 `--token` 互不排斥。证书生成与运维细则见 RUNBOOK §1.2e。
 - **轮换**:CA 与服务端证书/私钥同列加载驻留内存;轮换(含增删客户端信任)= 重启 agent。
 
 ### 9.3 退出码
@@ -552,11 +552,11 @@ Agent 端点：`GET /health`(浅存活)、`GET /ready`(配置加载成功 + 调�
 - 结构化字段约定：`target` / `check` / `incident`(u64)/ `degraded`(Degradation kind)/ `pid` / `attempt`。
 - 内部计数 (`/metrics` 暴露，eval 每轮发布):告警管道 `alerts_sent` / `alert_delivery_failures` / `alerts_dropped`;探测 `probe_executed` / `probe_skipped`;恢复 `restarts_total` / `state_transitions_total` / `fatal_targets` + 恢复状态分布 gauge(`recovery_running` … `recovery_fatal`);采集 `degradations_current`(瞬时)/ `degradations_events`(无→有跳变)/ `last_collect_at`;概览 `targets_total` / `checks_{ok,warning,critical}` / `services_{total,running}` / `uptime_secs`。
 - **指标历史持久化 (F39,`[metrics] history_path` 可选)**:eval 每轮发布的样本以 JSONL **追加**落盘 —— 独立 writer 任务 (`metrics_history` 顶层模块) 消费 metrics watch 克隆,**eval 零改动、不阻塞单写者** (watch 旁路)。语义与边界：
-  - **行格式 = `/metrics/history` 单样本对象** `{"at": <采样时刻>, "report": <MetricsReport>}`(`model::control::MetricsSample` 的 serde 形态),与该端点响应内的样本对象同构 —— 落盘文件直接按端点语义离线分析;`at` 由 writer 在消费时刻盖戳 (watch 通道不携带采样时刻,与 eval 入环同轮、亚毫秒偏差 —— 取舍记录)。
+  - **行格式 = `/metrics/history` 单样本对象** `{"at": <采样时刻>, "report": <MetricsReport>}`(`model::control::MetricsSample` 的 serde 形态),与该端点响应内的样本对象同构 —— 落盘文件直接按端点语义离线分析;`at` 由 writer 在消费时刻盖戳 (watch 通道不携带采样时刻,与 eval 入环**同轮**、通常亚毫秒偏差;journal 背压时 tick 体内的 await 可放大到毫秒至百毫秒级 —— 第十四轮验证如实化)。
   - **消费节奏与合并**：watch 每条变更写一行;writer 消费滞后时中间样本被最新值覆盖 (指标是瞬时快照,跳轮可接受,如实记录)。**首样本照写** (不去重):启动时 watch 当前值 (可能是全零默认报告) 也落一行 —— 重启追加不截断,历史跨重启连续。
   - **轮转 (复用 journal F24 单代模式)**:写**后**实测当前文件尺寸,超 10 MiB → 改名 `<stem>.1.jsonl` (只保留一代,二次轮转覆盖;gen1 路径复用 `recover::journal::gen1_path` 单一事实源);轮转失败 WARN 降级继续写当前文件 (体积上限是运维目标不是安全边界);轮转成功只写 `tracing::info`,**不写 journal audit** (journal 是恢复域,历史文件是观测出口,两域隔离)。
   - **写入与停机**：append+create 单写者整行写入,写入段无 await 点 —— 停机 abort 只落在 `changed().await`,不截断半行;最后在途样本可能不落盘 (观测数据可接受)。无逐行 fsync (可靠性 = OS 页缓存,崩溃丢尾部可容忍)。打开失败/轮转降级重开失败 → ERROR 后 writer 退出 (持久化静默失效不可取;agent 不因此停机 —— 观测出口非恢复域)。`history_path` 消费不依赖 reqwest,无 feature 门控。
-  - **不做重放/查询** (纯数据出口,分析走 jq/外部工具);外部 copytruncate 兼容 (O_APPEND + 实测尺寸),rename 式外部轮转无效、不得删除主文件 (RUNBOOK §1.2e)。
+  - **不做重放/查询** (纯数据出口,分析走 jq/外部工具);外部 copytruncate 兼容 (O_APPEND + 实测尺寸),rename 式外部轮转无效、不得删除主文件 (RUNBOOK §1.2f)。
 - 日志纪律：恢复/告警/降级三类事件必须 `INFO`+ 可追溯 (含 target 与原因);禁止在热路径 `DEBUG` 刷屏。
 
 ## 11. 测试策略
