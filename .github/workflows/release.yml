@@ -79,10 +79,23 @@ jobs:
           targets: ${{ matrix.target }}
       - if: matrix.container != null
         run: |
+          # 镜像预装 cargo 1.79 不认 edition2024;rustup update 后旧路径可能仍优先,
+          # 显式 default + PATH 校验(失败即早退,便于诊断)
           rustup update stable --force-non-host 2>/dev/null || rustup update stable
+          rustup default stable
           rustup target add ${{ matrix.target }}
+          echo "CARGO_HOME=$(dirname $(dirname $(command -v cargo)))" >> "$GITHUB_ENV" || true
+          cargo --version && rustc --version
       - if: matrix.container != null
-        run: cargo --version && rustc --version
+        run: |
+          # P3 防御:rustup default 后确认 cargo ≥1.85(edition2024)
+          v=$(cargo --version | grep -oE '[0-9]+\.[0-9]+')
+          major=${v%%.*}; minor=${v#*.}
+          echo "cargo $v"
+          if [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 85 ]; }; then
+            echo "::error::container cargo $v < 1.85 (edition2024 required); check image tag"
+            exit 1
+          fi
       # aws-lc-sys 构建链依赖;CMake 4 移除 <3.5 兼容,需显式放行(与 ci.yml 同口径)
       - if: runner.os == 'Windows'
         run: choco install -y nasm cmake
