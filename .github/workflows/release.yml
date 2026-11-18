@@ -113,7 +113,7 @@ jobs:
           if [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
             export MACOSX_DEPLOYMENT_TARGET=12.0
             if [ ! -d "$HOME/MacOSX13.sdk/usr/include" ]; then
-              curl -sL --retry 5 https://github.com/phracker/MacOSX-SDKs/releases/download/13.3/MacOSX13.3.sdk.tar.xz | tar -xJ -C "$HOME"
+              curl -sL --retry 5 https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz | tar -xJ -C "$HOME"
               mv "$HOME/MacOSX13.3.sdk" "$HOME/MacOSX13.sdk"
             fi
             export SDKROOT="$HOME/MacOSX13.sdk"
