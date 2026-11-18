@@ -300,14 +300,18 @@ mod imp {
                             let _ = run_task.await;
                             Ok(Ok(Ok(monitor_core::runtime::StopReason::Clean)))
                         }
-                        // runtime 任务 panic/JoinError:如实报告 PersistenceFailed 语义层不可用
+                        // runtime 任务 panic/JoinError:停机路径上一律受控停止 ——
+                        // 操作员已显式请求 stop,如实 error 留痕但不再触发 SCM
+                        // failure 重启(重启一个刚被要求停下的服务是错误响应)。
                         Ok(Err(join_err)) => {
                             tracing::error!(summary = %join_err, "runtime task join failed; reporting controlled stop");
                             Ok(Ok(Ok(monitor_core::runtime::StopReason::Clean)))
                         }
                         Ok(Ok(Err(core_err))) => {
-                            // run_with_config Err (含 PersistenceFailed → 退出 2,
-                            // SCM failure action 重启):按受控停止报告 STOPPED
+                            // run_with_config Err(如 PersistenceFailed):停机路径上
+                            // 与 DESIGN §9.3 的「运行期错误 → 退出 2」不同 —— 此处
+                            // 服务本就在退出,error 留痕后按受控停止(0)报告,
+                            // 避免 SCM failure action 把显式 stop 拉起重启。
                             tracing::error!(source = %core_err, "runtime returned error; reporting controlled stop");
                             Ok(Ok(Ok(monitor_core::runtime::StopReason::Clean)))
                         }
