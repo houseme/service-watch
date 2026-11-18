@@ -25,7 +25,7 @@ probe-http = ["http-client"]
 notify-webhook = ["http-client"]
 # F32:控制面 HTTPS(axum-server 的 rustls acceptor 随 control-http 一同启用)。
 # F38:mTLS 客户端 CA 解析与 WebPkiClientVerifier 随 control-http 一同启用
-# (rustls 本体类型;provider 显式传入,aws-lc-rs 由 axum-server 合并提供)。
+# (rustls 本体类型;provider 显式传入，aws-lc-rs 由 axum-server 合并提供)。
 control-http = ["dep:axum", "dep:axum-server", "dep:rustls-pemfile", "dep:rustls"]
 # ROADMAP「原生 Windows Service 目标恢复」:SCM 目标启停/状态查询 (windows.rs 的
 # RealScmOps)。默认不开 → 默认构建零影响;仅在 cfg(windows) 下拉起依赖，

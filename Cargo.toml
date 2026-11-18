@@ -50,7 +50,7 @@ rustls-pemfile = "2"
 # 公开 re-export)。default-features = false + [std, tls12]:provider 经
 # builder_with_provider 显式传入 (不 install_default),aws-lc-rs 由 axum-server
 # tls-rustls / reqwest rustls feature 合并提供 —— 本声明不新增任何编译单元。
-# 版本核对 2026-11-18 (Cargo.lock rustls 0.23.46,与 axum-server/reqwest 同线)。
+# 版本核对 2026-11-18 (Cargo.lock rustls 0.23.46，与 axum-server/reqwest 同线)。
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 
 clap = { version = "4", features = ["derive"] }

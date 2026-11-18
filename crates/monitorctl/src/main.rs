@@ -17,8 +17,8 @@
 //! 信任链 (自签 CA 安装见 docs/RUNBOOK),明文校验关闭意味着中间人不可检测。
 //!
 //! F38 mTLS:agent 配置 `[control] client_ca_cert` 后握手要求客户端证书。
-//! 全局 `--client-cert <PATH>` + `--client-key <PATH>`(成对必填,单边 →
-//! 启动错误) 经 `reqwest::Identity::from_pem` 构建客户端身份,所有子命令
+//! 全局 `--client-cert <PATH>` + `--client-key <PATH>`(成对必填，单边 →
+//! 启动错误) 经 `reqwest::Identity::from_pem` 构建客户端身份，所有子命令
 //! 共用 (经 build_client 注入);信任链三件套 TLS + Bearer + mTLS 可叠加 ——
 //! `--token` 与 `--client-cert` 互不排斥 (见 DESIGN §9.2.2)。
 //!
@@ -69,13 +69,13 @@ struct Cli {
     insecure: bool,
 
     /// F38:mTLS 客户端证书 PEM 路径 (与 --client-key 成对必填;对 http://
-    /// URL 无影响)。agent 配置 client_ca_cert 时,控制面要求由其 CA 签发的
-    /// 客户端证书 —— 缺失/不可信证书在 TLS 握手层被拒(连接错误)。
+    /// URL 无影响)。agent 配置 client_ca_cert 时，控制面要求由其 CA 签发的
+    /// 客户端证书 —— 缺失/不可信证书在 TLS 握手层被拒 (连接错误)。
     #[arg(long, global = true, value_name = "PATH")]
     client_cert: Option<PathBuf>,
 
     /// F38:mTLS 客户端私钥 PEM 路径 (与 --client-cert 成对必填;PKCS#8/
-    /// PKCS#1/SEC1,密钥文件内容不落日志/错误输出)。
+    /// PKCS#1/SEC1，密钥文件内容不落日志/错误输出)。
     #[arg(long, global = true, value_name = "PATH")]
     client_key: Option<PathBuf>,
 
@@ -170,11 +170,11 @@ enum Cmd {
 async fn main() {
     init_logging();
     let cli = Cli::parse();
-    // F23:token 解析(flag 优先,env 兜底;解析一次,全命令复用)。
+    // F23:token 解析 (flag 优先，env 兜底;解析一次，全命令复用)。
     let env_token = std::env::var("SERVICE_WATCH_TOKEN").ok();
     let token = resolve_token(cli.token.as_deref(), env_token.as_deref());
-    // F38:mTLS 客户端证书解析(成对校验 + Identity 构建,启动期早失败 ——
-    // 路径错误/不成对不发起任何请求,退出码 2 与「运行错误」同列)。
+    // F38:mTLS 客户端证书解析 (成对校验 + Identity 构建，启动期早失败 ——
+    // 路径错误/不成对不发起任何请求，退出码 2 与「运行错误」同列)。
     let identity =
         match resolve_client_identity(cli.client_cert.as_deref(), cli.client_key.as_deref()) {
             Ok(id) => id,
@@ -183,8 +183,8 @@ async fn main() {
                 std::process::exit(2);
             }
         };
-    // 注入 build_client 共享出口(既有 cmd_* 签名与调用形态零改动;设置仅此
-    // 一次,矛盾即程序错误)。
+    // 注入 build_client 共享出口 (既有 cmd_* 签名与调用形态零改动;设置仅此
+    // 一次，矛盾即程序错误)。
     CLIENT_IDENTITY
         .set(identity)
         .expect("client identity must be set exactly once at startup");
@@ -1177,21 +1177,21 @@ fn fmt_time(t: std::time::SystemTime) -> String {
         .unwrap_or_else(|_| "-".to_string())
 }
 
-/// F38:mTLS 客户端身份的共享出口(main 启动期一次性写入,build_client 读取;
-/// `None` = 未配置客户端证书,行为与 F32 完全一致)。用 `OnceLock` 而非给
-/// 全部 cmd_* 加参数:identity 在进程内全局唯一,透传只发生在 build_client
+/// F38:mTLS 客户端身份的共享出口 (main 启动期一次性写入，build_client 读取;
+/// `None` = 未配置客户端证书，行为与 F32 完全一致)。用 `OnceLock` 而非给
+/// 全部 cmd_* 加参数:identity 在进程内全局唯一，透传只发生在 build_client
 /// 一处 —— 与「flag 解析 → 启动错误 → 全命令复用」的 token 处理同构。
 static CLIENT_IDENTITY: std::sync::OnceLock<Option<reqwest::Identity>> = std::sync::OnceLock::new();
 
-/// F38 客户端身份解析(成对 flag → `reqwest::Identity`;main 启动期调用):
-/// - 双 `None` → `Ok(None)`(不带客户端证书,现状);
-/// - 单边有值 → `Err`(提示成对,启动错误);
-/// - 成对 → 读两文件,证书与私钥 PEM 拼接后
+/// F38 客户端身份解析 (成对 flag → `reqwest::Identity`;main 启动期调用):
+/// - 双 `None` → `Ok(None)`(不带客户端证书，现状);
+/// - 单边有值 → `Err`(提示成对，启动错误);
+/// - 成对 → 读两文件，证书与私钥 PEM 拼接后
 ///   [`reqwest::Identity::from_pem`](reqwest 0.13 rustls 后端唯一 PEM 入口 ——
-///   单 buffer 扫描全部 PEM 段,key 支持 PKCS#8/#1/SEC1;`from_pkcs8_pem`
-///   仅 native-tls feature 提供,本 crate 未启用)。
+///   单 buffer 扫描全部 PEM 段，key 支持 PKCS#8/#1/SEC1;`from_pkcs8_pem`
+///   仅 native-tls feature 提供，本 crate 未启用)。
 ///
-/// 错误只含路径与解析原因 —— 证书/私钥内容不进错误输出(与 agent 端
+/// 错误只含路径与解析原因 —— 证书/私钥内容不进错误输出 (与 agent 端
 /// token/私钥同纪律)。
 fn resolve_client_identity(
     cert: Option<&Path>,
@@ -1223,7 +1223,7 @@ fn resolve_client_identity(
 /// 校验 (`danger_accept_invalid_certs`),仅自签/测试场景 —— 生产部署应信任
 /// agent 证书的 CA(自签 CA 安装见 docs/RUNBOOK);对 http:// URL 无影响。
 /// `https://` 支持来自 reqwest rustls feature(与 agent 端 axum-server 同线)。
-/// F38:`CLIENT_IDENTITY` 已配置时附带 mTLS 客户端证书(agent 端
+/// F38:`CLIENT_IDENTITY` 已配置时附带 mTLS 客户端证书 (agent 端
 /// client_ca_cert 校验场景;远程运维/测试用)。
 fn build_client(insecure: bool) -> std::result::Result<reqwest::Client, reqwest::Error> {
     let mut builder = reqwest::Client::builder().timeout(HTTP_TIMEOUT);
@@ -1580,9 +1580,9 @@ mod tests {
 
     // ---- F38 --client-cert/--client-key / mTLS 客户端 ----
 
-    /// `--client-cert`/`--client-key` 全局 flag 解析(global = true,子命令
+    /// `--client-cert`/`--client-key` 全局 flag 解析 (global = true，子命令
     /// 前后皆可);缺省 = 不带客户端证书。build_client 在 CLIENT_IDENTITY
-    /// 未设置时与 F32 行为一致(OnceLock 默认 None)。
+    /// 未设置时与 F32 行为一致 (OnceLock 默认 None)。
     #[test]
     fn parse_client_cert_flags() {
         let cli = Cli::try_parse_from([
@@ -1614,16 +1614,16 @@ mod tests {
             "缺省不带"
         );
 
-        // build_client 不依赖 CLIENT_IDENTITY 已设置(未设置 = None = F32 行为)。
+        // build_client 不依赖 CLIENT_IDENTITY 已设置 (未设置 = None = F32 行为)。
         build_client(false).unwrap();
     }
 
     /// F38 resolve_client_identity(纯函数级):
     /// - 双 None → Ok(None);
-    /// - 单边 → Err 提示成对(启动错误,退出码 2 的前置);
+    /// - 单边 → Err 提示成对 (启动错误，退出码 2 的前置);
     /// - 坏文件 / 垃圾 PEM → Err 且不回显文件内容;
     /// - 真实 PEM 产物的成功路径由 monitor-core tests/tls_control.rs
-    ///   `reqwest_identity_accepts_rcgen_pem` 覆盖(同一 from_pem API;
+    ///   `reqwest_identity_accepts_rcgen_pem` 覆盖 (同一 from_pem API;
     ///   monitorctl 无 rcgen dev 依赖)。
     #[test]
     fn resolve_client_identity_pairing_and_errors() {
@@ -1650,7 +1650,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let cert = dir.join("cert.pem");
         let key = dir.join("key.pem");
-        // 非 base64 内容:PEM 段解析失败(注意 from_pem 只做段解析,密钥
+        // 非 base64 内容:PEM 段解析失败 (注意 from_pem 只做段解析，密钥
         // 有效性由 rustls 在连接期校验 —— 合法 base64 的伪内容不会在此拒绝)。
         let key_content =
             "-----BEGIN PRIVATE KEY-----\n!!! not base64 !!!\n-----END PRIVATE KEY-----\n";

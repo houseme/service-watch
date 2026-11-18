@@ -263,10 +263,10 @@ mod imp {
                 res = &mut run_task => Ok(res),
                 _ = stop_rx.recv() => {
                     // SCM stop:先触发进程内优雅停机 (request_shutdown → runtime
-                    // notify 分支,与信号停机相同的完整停机序列) —— 必须在报告
+                    // notify 分支，与信号停机相同的完整停机序列) —— 必须在报告
                     // **之前**调用 (第七次发布调试:report 后调用的时序下
-                    // runtime 停机分支在 CI 上未触发,服务卡 STOP_PENDING);
-                    // 再报告 StopPending (controls 清空,SCM 不再投递控制)。
+                    // runtime 停机分支在 CI 上未触发，服务卡 STOP_PENDING);
+                    // 再报告 StopPending (controls 清空，SCM 不再投递控制)。
                     monitor_core::runtime::request_shutdown();
                     report(
                         &status_handle,
@@ -275,9 +275,9 @@ mod imp {
                         ServiceExitCode::NO_ERROR,
                         STOP_PENDING_HINT,
                     )?;
-                    // 停机兜底:优雅等待 30s (= StopPending wait hint);超时则
+                    // 停机兜底：优雅等待 30s (= StopPending wait hint);超时则
                     // abort runtime 任务并照常报告 STOPPED —— SCM 契约 (达到
-                    // STOPPED) 优先于 runtime 内部状态,挂死原因经 error 日志
+                    // STOPPED) 优先于 runtime 内部状态，挂死原因经 error 日志
                     // 排查。
                     let awaited = tokio::time::timeout(
                         STOP_PENDING_HINT,
@@ -301,8 +301,8 @@ mod imp {
                             Ok(Ok(Ok(monitor_core::runtime::StopReason::Clean)))
                         }
                         // runtime 任务 panic/JoinError:停机路径上一律受控停止 ——
-                        // 操作员已显式请求 stop,如实 error 留痕但不再触发 SCM
-                        // failure 重启(重启一个刚被要求停下的服务是错误响应)。
+                        // 操作员已显式请求 stop，如实 error 留痕但不再触发 SCM
+                        // failure 重启 (重启一个刚被要求停下的服务是错误响应)。
                         Ok(Err(join_err)) => {
                             tracing::error!(summary = %join_err, "runtime task join failed; reporting controlled stop");
                             Ok(Ok(Ok(monitor_core::runtime::StopReason::Clean)))
@@ -310,7 +310,7 @@ mod imp {
                         Ok(Ok(Err(core_err))) => {
                             // run_with_config Err(如 PersistenceFailed):停机路径上
                             // 与 DESIGN §9.3 的「运行期错误 → 退出 2」不同 —— 此处
-                            // 服务本就在退出,error 留痕后按受控停止(0)报告,
+                            // 服务本就在退出，error 留痕后按受控停止 (0) 报告，
                             // 避免 SCM failure action 把显式 stop 拉起重启。
                             tracing::error!(source = %core_err, "runtime returned error; reporting controlled stop");
                             Ok(Ok(Ok(monitor_core::runtime::StopReason::Clean)))

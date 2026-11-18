@@ -76,29 +76,29 @@
 //!
 //! ## F38 控制面 mTLS(可选客户端证书校验)
 //!
-//! `[control] client_ca_cert`(PEM 路径,config 校验强制与 tls_cert/tls_key
-//! 同配)配置后,服务端在 TLS 握手层**要求**客户端证书:证书须由该 CA(或其
-//! 下级 CA)签发且在有效期内,否则握手以 alert 失败 —— 无证书/不可信证书
-//! 的客户端表现为连接错误,不产生任何 HTTP 层交互。`None` = 不请求客户端
-//! 证书,行为与 F32 完全一致(向后兼容)。
+//! `[control] client_ca_cert`(PEM 路径，config 校验强制与 tls_cert/tls_key
+//! 同配) 配置后，服务端在 TLS 握手层**要求**客户端证书：证书须由该 CA(或其
+//! 下级 CA) 签发且在有效期内，否则握手以 alert 失败 —— 无证书/不可信证书
+//! 的客户端表现为连接错误，不产生任何 HTTP 层交互。`None` = 不请求客户端
+//! 证书，行为与 F32 完全一致 (向后兼容)。
 //!
-//! - **实现**:`rustls::server::WebPkiClientVerifier`(严格 webpki 校验,
+//! - **实现**:`rustls::server::WebPkiClientVerifier`(严格 webpki 校验，
 //!   不用 `allow_untrusted`/`allow_unauthenticated`) 经
 //!   `builder_with_provider(roots, provider)` 复用与 F32 同一 provider 选型
-//!   (进程级 `CryptoProvider::get_default()` 优先,否则局部构造 aws-lc
+//!   (进程级 `CryptoProvider::get_default()` 优先，否则局部构造 aws-lc
 //!   provider,**不 install_default**);ServerConfig 以
 //!   `with_client_cert_verifier(..).with_single_cert(..)` 手工构建后交
 //!   `RustlsConfig::from_config`(axum-server 该构造**不代设 ALPN**,此处
 //!   对齐其内部 helper 的 `h2`/`http/1.1` 序列手工补齐)。
-//! - **加载时机**:与 F32 同列 —— [`load_tls_config`] 装配期调用,CA 文件
+//! - **加载时机**:与 F32 同列 —— [`load_tls_config`] 装配期调用，CA 文件
 //!   缺失/解析失败/无有效证书 → `Err` → runtime 早退 → main 退出码 2;
-//!   CA 证书解析**严格模式**(任一 PEM 段失败即拒绝,不做
-//!   `add_parsable_certificates` 宽容收集)。错误只含路径与解析原因,证书/
+//!   CA 证书解析**严格模式**(任一 PEM 段失败即拒绝，不做
+//!   `add_parsable_certificates` 宽容收集)。错误只含路径与解析原因，证书/
 //!   私钥内容不进错误/日志。
-//! - **鉴权叠加语义**:mTLS 在 TLS 握手层,Bearer (F23) 在 HTTP 层 ——
-//!   两者可独立叠加(信任链三件套 TLS + Bearer + mTLS,DESIGN §9.2.2);
-//!   鉴权中间件仍在 TLS 层之后,401 语义不变,mTLS 失败根本到不了 HTTP 层。
-//! - **停机/轮换**:与 F32 同口径(接受循环由 runtime abort;材料读入内存,
+//! - **鉴权叠加语义**:mTLS 在 TLS 握手层，Bearer (F23) 在 HTTP 层 ——
+//!   两者可独立叠加 (信任链三件套 TLS + Bearer + mTLS,DESIGN §9.2.2);
+//!   鉴权中间件仍在 TLS 层之后，401 语义不变，mTLS 失败根本到不了 HTTP 层。
+//! - **停机/轮换**:与 F32 同口径 (接受循环由 runtime abort;材料读入内存，
 //!   轮换 = 重启 agent)。
 
 use std::net::SocketAddr;
@@ -158,9 +158,9 @@ pub struct ControlShared {
 /// → `Err(Config)`。错误信息仅含路径与解析原因 —— 文件内容 (尤其私钥) 不进
 /// 错误/日志。provider 选型与停机语义见模块 doc「F32 控制面 HTTPS」。
 ///
-/// F38:`client_ca = Some(ca)`(config 校验强制与 cert/key 同配)时以
+/// F38:`client_ca = Some(ca)`(config 校验强制与 cert/key 同配) 时以
 /// [`build_mtls_config`] 构建**带客户端证书校验**的 ServerConfig(严格
-/// WebPkiClientVerifier,见模块 doc「F38 控制面 mTLS」);`None` → F32 现状
+/// WebPkiClientVerifier，见模块 doc「F38 控制面 mTLS」);`None` → F32 现状
 /// 路径零改动。
 #[cfg(feature = "control-http")]
 pub async fn load_tls_config(
@@ -198,7 +198,7 @@ pub async fn load_tls_config(
     }
 }
 
-/// F38 mTLS provider 选型:与 axum-server 内部 helper 同口径 —— 进程级
+/// F38 mTLS provider 选型：与 axum-server 内部 helper 同口径 —— 进程级
 /// `CryptoProvider::get_default()` 优先 (reqwest/axum-server 同线 aws-lc-rs),
 /// 否则按 feature 合并结果局部构造 aws-lc provider。**不调用
 /// `install_default`**,无进程级重复安装 panic 面 (模块 doc「F32 provider」)。
@@ -211,9 +211,9 @@ fn tls_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
 }
 
 /// F38:带客户端证书校验的 TLS 配置装配 (mTLS)。CA/server 证书与私钥的
-/// 文件 IO + PEM 解析放 `spawn_blocking`(启动期一次性,避免阻塞 worker;
-/// 与 axum-server `from_pem_file` 内部同做法)。失败 → `Err`(装配期早退,
-/// 与 F32 同列);错误只含路径与解析原因,证书/私钥内容不进错误/日志。
+/// 文件 IO + PEM 解析放 `spawn_blocking`(启动期一次性，避免阻塞 worker;
+/// 与 axum-server `from_pem_file` 内部同做法)。失败 → `Err`(装配期早退，
+/// 与 F32 同列);错误只含路径与解析原因，证书/私钥内容不进错误/日志。
 #[cfg(feature = "control-http")]
 async fn build_mtls_config(
     cert: &std::path::Path,
@@ -233,7 +233,7 @@ async fn build_mtls_config(
 /// [`build_mtls_config`] 的阻塞实现 (spawn_blocking 内执行)。
 ///
 /// CA 证书解析为**严格模式**:逐段 `RootCertStore::add`,证书段损坏
-/// (证书段损坏;非证书段会被静默跳过) 即 `Err` —— 信任链配置错误宁可启动失败,不做
+/// (证书段损坏;非证书段会被静默跳过) 即 `Err` —— 信任链配置错误宁可启动失败，不做
 /// `add_parsable_certificates` 宽容收集 (静默丢根 = 拒信面扩大)。
 #[cfg(feature = "control-http")]
 fn build_mtls_config_blocking(
@@ -245,7 +245,7 @@ fn build_mtls_config_blocking(
     use rustls::pki_types::CertificateDer;
     use rustls::server::{ServerConfig, WebPkiClientVerifier};
 
-    // 客户端 CA 信任锚:文件缺失/坏 PEM/空文件全部装配期拒绝 (错误带路径,
+    // 客户端 CA 信任锚：文件缺失/坏 PEM/空文件全部装配期拒绝 (错误带路径，
     // 不回显内容)。
     let mut ca_reader = std::io::BufReader::new(std::fs::File::open(ca).map_err(|e| {
         crate::error::CoreError::Control(format!(
@@ -310,7 +310,7 @@ fn build_mtls_config_blocking(
             ))
         })?;
 
-    // 严格客户端证书校验器:必须由 CA 链签发 (不 allow_untrusted /
+    // 严格客户端证书校验器：必须由 CA 链签发 (不 allow_untrusted /
     // 不 allow_unauthenticated —— 后者会退化为「证书可选」)。
     let provider = tls_crypto_provider();
     let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
@@ -337,7 +337,7 @@ fn build_mtls_config_blocking(
             ))
         })?;
     // `RustlsConfig::from_config` 不代设 ALPN (其 doc 明示需手工设置):对齐
-    // axum-server 内部 helper 的 ALPN_PROTOCOLS (h2 优先,回退 http/1.1),
+    // axum-server 内部 helper 的 ALPN_PROTOCOLS (h2 优先，回退 http/1.1),
     // 缺失会导致握手后无应用协议协商。
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     tracing::info!("control plane mTLS enabled (client certificate required)");

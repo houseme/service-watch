@@ -92,10 +92,10 @@ static REQUEST_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::Onc
 
 /// 请求 agent 优雅停机 (线程安全;幂等;返回 true = 本次为首个停机请求)。
 ///
-/// 唤醒语义约束(第十七轮 P0 教训):消费端 select 的 `notified()` 分支**不得
-/// 加 `if REQUESTED` 前置守卫** —— 分支禁用时 `notified()` 未注册等待者,
-/// `notify_one` 存的 permit 不会唤醒任务,无其他唤醒源即死锁(SCM stop 实弹)。
-/// 正确写法:分支恒启用,体内查 `REQUESTED` 过滤上一轮 run 残留的 permit。
+/// 唤醒语义约束 (第十七轮 P0 教训):消费端 select 的 `notified()` 分支**不得
+/// 加 `if REQUESTED` 前置守卫** —— 分支禁用时 `notified()` 未注册等待者，
+/// `notify_one` 存的 permit 不会唤醒任务，无其他唤醒源即死锁 (SCM stop 实弹)。
+/// 正确写法：分支恒启用，体内查 `REQUESTED` 过滤上一轮 run 残留的 permit。
 pub fn request_shutdown() -> bool {
     let first = !REQUESTED.swap(true, Ordering::SeqCst);
     // notify_one 在没有等待者时保留 permit，也允许后续 run 再次被请求停机。
@@ -137,7 +137,7 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
     // P3(第十一轮验证):与 bind 同受 control.enabled 门控 —— 控制面关闭时
     // TLS 配置不会被消费，坏材料不应阻止 agent 启动。
     // F38:client_ca_cert(Some = mTLS 客户端证书校验) 随同一装配点加载，
-    // CA 缺失/坏 PEM 同列早退(verifier 内嵌于 RustlsConfig，bind_and_serve
+    // CA 缺失/坏 PEM 同列早退 (verifier 内嵌于 RustlsConfig，bind_and_serve
     // 签名不变)。
     #[cfg(feature = "control-http")]
     let control_tls = if cfg.control.enabled {
@@ -446,16 +446,16 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
                         }
                         // F15 停机请求:notified **不带 if 守卫**(第十七轮 P0:
                         // 守卫在 REQUESTED=false 时禁用分支 → notified 未注册
-                        // 等待者 → notify_one 只存 permit 不唤醒,Windows 服务
+                        // 等待者 → notify_one 只存 permit 不唤醒，Windows 服务
                         // 形态无其他唤醒源 → select 永不重 poll,SCM stop 死锁
-                        // 于 STOP_PENDING)。permit 恒注册,唤醒后在体内查标志
+                        // 于 STOP_PENDING)。permit 恒注册，唤醒后在体内查标志
                         // 过滤残留 permit(入口已复位)。
                         _ = REQUEST_NOTIFY.get_or_init(tokio::sync::Notify::new).notified() => {
                             if REQUESTED.load(Ordering::SeqCst) {
                                 tracing::info!("in-process shutdown requested (F15 service stop)");
                                 break StopReason::Clean
                             }
-                            // 上一次 run 残留的 permit:标志已复位,吞掉继续等待。
+                            // 上一次 run 残留的 permit:标志已复位，吞掉继续等待。
                         }
                     }
                 }
@@ -481,8 +481,8 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
                             tracing::info!(signal = "SIGINT", "shutdown signal received");
                             break StopReason::Signal
                         }
-                        // F15 停机请求:同 unix 分支 —— notified 不带 if 守卫
-                        // (第十七轮 P0:守卫禁用分支导致 permit 不唤醒,SCM
+                        // F15 停机请求：同 unix 分支 —— notified 不带 if 守卫
+                        // (第十七轮 P0:守卫禁用分支导致 permit 不唤醒，SCM
                         // stop 死锁于 STOP_PENDING;F36 首跑实弹证据),体内查
                         // 标志过滤残留 permit。
                         _ = REQUEST_NOTIFY.get_or_init(tokio::sync::Notify::new).notified() => {
@@ -490,7 +490,7 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
                                 tracing::info!("in-process shutdown requested (F15 service stop)");
                                 break StopReason::Clean
                             }
-                            // 上一次 run 残留的 permit:标志已复位,吞掉继续等待。
+                            // 上一次 run 残留的 permit:标志已复位，吞掉继续等待。
                         }
                     }
                 }
@@ -744,7 +744,7 @@ impl Notifier for NoopNotifier {
 /// F29:默认通道用 `webhook_secret`,每条 route 用 [`effective_route_secret`]
 /// (路由级覆盖全局;两者皆 None 不签名)。密钥值不进日志。
 /// F37:默认通道传全局 `[alert] headers`,每条 route 用 [`effective_route_headers`]
-/// (全局为底,路由级同名键覆盖)。头值可能是敏感 token,不进日志。
+/// (全局为底，路由级同名键覆盖)。头值可能是敏感 token，不进日志。
 fn build_notifier(cfg: &AlertCfg) -> Arc<dyn Notifier> {
     let default = build_default_notifier(cfg);
     if cfg.routes.is_empty() {
@@ -801,9 +801,9 @@ fn effective_route_secret(route: Option<&str>, global: Option<&str>) -> Option<S
     route.or(global).map(str::to_string)
 }
 
-/// F37:路由级投递头合并 —— 全局 `[alert] headers` 为底,`route.headers` 同名键
-/// **覆盖**全局,非同名键共存 (BTreeMap 顺序插入即覆盖;纯函数,便于单测)。
-/// 头值可能是敏感 token:只随 notifier 进请求头,不落日志/审计。
+/// F37:路由级投递头合并 —— 全局 `[alert] headers` 为底，`route.headers` 同名键
+/// **覆盖**全局，非同名键共存 (BTreeMap 顺序插入即覆盖;纯函数，便于单测)。
+/// 头值可能是敏感 token:只随 notifier 进请求头，不落日志/审计。
 #[cfg(feature = "notify-webhook")]
 fn effective_route_headers(
     route: &std::collections::BTreeMap<String, String>,
@@ -829,7 +829,7 @@ fn build_default_notifier(cfg: &AlertCfg) -> Arc<dyn Notifier> {
         ) {
             Ok(n) => {
                 // F29:signed 只报「是否启用签名」,密钥值不落日志。
-                // F37:headers 数量只报规模,头名/头值都不落日志。
+                // F37:headers 数量只报规模，头名/头值都不落日志。
                 tracing::info!(
                     format = ?cfg.webhook_format,
                     timeout = ?cfg.timeout,
@@ -888,7 +888,7 @@ mod tests {
 
     // ---- F37:路由级投递头合并 ----
 
-    /// 合并语义:`route.headers` 同名键**覆盖**全局,非同名键共存;空表各自成立。
+    /// 合并语义:`route.headers` 同名键**覆盖**全局，非同名键共存;空表各自成立。
     #[cfg(feature = "notify-webhook")]
     #[test]
     fn route_headers_override_global_and_nonconflicting_coexist() {

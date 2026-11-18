@@ -1019,7 +1019,7 @@ impl Config {
         let mut check_headers = |where_: &str, hs: &BTreeMap<String, String>| {
             // P3(第十六轮):HeaderName 线上归一为小写 —— 大小写变体是同一头;
             // 合并前不折叠会产生"全局 Authorization + 路由 authorization"同名双头
-            // 穿透到线上。BTreeMap 键序下同折叠键的变体必相邻,检出即拒。
+            // 穿透到线上。BTreeMap 键序下同折叠键的变体必相邻，检出即拒。
             let mut fold: std::collections::HashMap<String, &String> =
                 std::collections::HashMap::new();
             for k in hs.keys() {
@@ -1028,7 +1028,7 @@ impl Config {
                     say(
                         &mut errs,
                         format!(
-                            "{where_}: header name {prev:?} / {k:?} 仅大小写不同 —— HTTP 头名不区分大小写,会发出同名双头"
+                            "{where_}: header name {prev:?} / {k:?} 仅大小写不同 —— HTTP 头名不区分大小写，会发出同名双头"
                         ),
                     );
                 } else {
@@ -1046,12 +1046,12 @@ impl Config {
                 // `b >= 32 && b != 127 || b == TAB`(≥128 一律拒)—— Rust
                 // is_control() 不覆盖 ≥ U+00A0 的非 ASCII(如 "café"),曾出现
                 // "config 通过 → 构造期 WARN 丢弃 → 接收方缺头 401" 的排查黑洞。
-                // 此处与 http crate 字节规则精确对齐:仅可见 ASCII + TAB。
+                // 此处与 http crate 字节规则精确对齐：仅可见 ASCII + TAB。
                 if v.is_empty() || !v.bytes().all(|b| (b >= 32 && b != 127) || b == b'\t') {
                     say(
                         &mut errs,
                         format!(
-                            "{where_}: header {k:?} 的值不得为空,且仅可含可见 ASCII 字符与 TAB(header 值字节规则)"
+                            "{where_}: header {k:?} 的值不得为空，且仅可含可见 ASCII 字符与 TAB(header 值字节规则)"
                         ),
                     );
                 }
@@ -1059,14 +1059,14 @@ impl Config {
         };
         check_headers("alert.headers", &self.alert.headers);
         // P3(第十六轮):跨表折叠冲突 —— 路由头与全局头大小写变体合并后
-        // 同名双头,与表内变体同样拒绝。
+        // 同名双头，与表内变体同样拒绝。
         let global_fold: std::collections::BTreeSet<String> = self
             .alert
             .headers
             .keys()
             .map(|k| k.to_ascii_lowercase())
             .collect();
-        // 先收集跨表冲突,再统一 say(check_headers 闭包持有 &mut errs,循环内
+        // 先收集跨表冲突，再统一 say(check_headers 闭包持有 &mut errs，循环内
         // 直接调用会 double borrow)。
         let mut cross_conflicts: Vec<String> = Vec::new();
         for route in &self.alert.routes {
@@ -1104,8 +1104,8 @@ impl Config {
             say(&mut errs, "metrics: history_path 不能为空路径".into());
         }
         // P3(第十六轮):与 journal/spool 系统文件碰撞守卫 —— 双写互踩会同时
-        // 破坏恢复域(journal 重放遇 history 行当坏行)与观测域,且两套轮转器
-        // 互踩(Windows 下持 fd 使对方 rename 失败)。junction 规避也不能逃过
+        // 破坏恢复域 (journal 重放遇 history 行当坏行) 与观测域，且两套轮转器
+        // 互踩 (Windows 下持 fd 使对方 rename 失败)。junction 规避也不能逃过
         // 规范化路径比对。
         if let Some(hp) = &self.metrics.history_path {
             let hp_norm = std::fs::canonicalize(hp).unwrap_or_else(|_| hp.clone());

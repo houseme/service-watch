@@ -1,5 +1,5 @@
-//! F39 指标历史持久化:`[metrics] history_path`(可选)把 eval 每轮发布的运行
-//! 指标样本以 JSONL 追加落盘 —— 纯**观测数据出口**，不做重放/查询(分析走
+//! F39 指标历史持久化:`[metrics] history_path`(可选) 把 eval 每轮发布的运行
+//! 指标样本以 JSONL 追加落盘 —— 纯**观测数据出口**，不做重放/查询 (分析走
 //! jq/外部工具，DESIGN §10)。
 //!
 //! ## 行格式 (= `/metrics/history` 单样本对象)
@@ -10,7 +10,7 @@
 //! 不携带采样时刻，取舍记录见 DESIGN §10)。
 //!
 //! ## 消费语义
-//! - 独立任务消费 metrics watch 克隆(`watch::Receiver<Arc<MetricsReport>>`),
+//! - 独立任务消费 metrics watch 克隆 (`watch::Receiver<Arc<MetricsReport>>`),
 //!   **每条变更写一行**，绝不阻塞 eval 单写者 (watch 旁路，eval 零改动);
 //! - watch 合并语义：writer 消费滞后时中间样本被最新值覆盖 —— 极端滞后下
 //!   落盘的是最新值而非全部中间轮 (指标是瞬时快照，跳轮可接受，如实记录);
@@ -21,9 +21,9 @@
 //! ## 文件与轮转 (复用 journal F24 单代模式)
 //! - 打开模式 append+create (重启追加);单写者整行写入，写入段无 await 点 ——
 //!   runtime 停机 abort 只落在 `changed().await`，不会截断半行 (打开时也**不做**
-//!   journal 式半行定界:进程崩溃恰好落在 write_all 中途才可能产生残行，
+//!   journal 式半行定界：进程崩溃恰好落在 write_all 中途才可能产生残行，
 //!   概率极低，分析侧容忍即可);
-//! - 轮转 = 写**后**实测当前文件尺寸 (与 journal F24 同款:内核实测天然兼容
+//! - 轮转 = 写**后**实测当前文件尺寸 (与 journal F24 同款：内核实测天然兼容
 //!   外部 truncate)，超 [`HISTORY_ROTATE_THRESHOLD`] (10 MiB) → 改名 `.1`
 //!   (只保留一代，二次轮转覆盖)，gen1 路径复用 [`crate::recover::journal::
 //!   gen1_path`] 单一事实源;阈值是软性运维目标，单行溢出可接受;
@@ -50,16 +50,16 @@ use crate::model::control::{MetricsReport, MetricsSample};
 /// 写后实测尺寸超阈值即改名 `.1` 保留一代;0 = 完全禁用轮转 (仅测试用)。
 pub const HISTORY_ROTATE_THRESHOLD: u64 = 10 * 1024 * 1024;
 
-/// 写失败 WARN 采样间隔 (对齐 journal 轮转失败的模式:首次 + 每 64 次)。
+/// 写失败 WARN 采样间隔 (对齐 journal 轮转失败的模式：首次 + 每 64 次)。
 const WARN_SAMPLE_EVERY: u64 = 64;
 
-/// 产品入口:默认阈值 [`HISTORY_ROTATE_THRESHOLD`]。测试用
+/// 产品入口：默认阈值 [`HISTORY_ROTATE_THRESHOLD`]。测试用
 /// [`run_history_writer_with_limit`] 注入小阈值驱动轮转。
 pub async fn run_history_writer(path: PathBuf, metrics_rx: watch::Receiver<Arc<MetricsReport>>) {
     run_history_writer_with_limit(path, metrics_rx, HISTORY_ROTATE_THRESHOLD).await
 }
 
-/// 历史写任务。`max_size`:轮转阈值 (字节;0 = 禁用轮转,测试注入小阈值)。
+/// 历史写任务。`max_size`:轮转阈值 (字节;0 = 禁用轮转，测试注入小阈值)。
 /// 打开失败/轮转降级重开失败 = 路径真实故障 → ERROR 后任务退出 (历史持久化
 /// 静默失效不可取;agent 不因此停机 —— 观测出口非恢复域)。
 pub async fn run_history_writer_with_limit(
@@ -81,7 +81,7 @@ pub async fn run_history_writer_with_limit(
     let mut write_failures: u64 = 0;
     let mut rotation_failures: u64 = 0;
 
-    // F39 取舍:首样本照写 (不去重) —— watch 当前值先落一行，重启追加不截断，
+    // F39 取舍：首样本照写 (不去重) —— watch 当前值先落一行，重启追加不截断，
     // 历史跨重启连续 (可能是一行全零默认报告，如实记录)。
     let initial = metrics_rx.borrow_and_update().clone();
     file = match write_and_maybe_rotate(
@@ -152,7 +152,7 @@ fn write_and_maybe_rotate(
         // 句柄仍持有，下一轮继续写 (观测数据尽力而为，不终止任务)。
         return Some(file);
     }
-    // 写后实测 (journal F24 同款:外部 truncate 清零后不会误轮转);0 = 禁用。
+    // 写后实测 (journal F24 同款：外部 truncate 清零后不会误轮转);0 = 禁用。
     if max_size == 0 {
         return Some(file);
     }
@@ -162,7 +162,7 @@ fn write_and_maybe_rotate(
     if meta.len() <= max_size {
         return Some(file);
     }
-    // 轮转:释放句柄 (Windows 打开中的文件不可 rename) → 删旧 .1 → 改名 →
+    // 轮转：释放句柄 (Windows 打开中的文件不可 rename) → 删旧 .1 → 改名 →
     // 重建当前文件 (journal F24 同款顺序;gen1 路径复用 journal 单一事实源)。
     let rotated_bytes = meta.len();
     drop(file);
@@ -207,7 +207,7 @@ fn warn_sampled(count: u64, log: impl FnOnce()) {
     }
 }
 
-/// 单代轮转:删旧 `.1` → 当前文件改名 `.1` → 重建当前文件。
+/// 单代轮转：删旧 `.1` → 当前文件改名 `.1` → 重建当前文件。
 /// `gen1_path` 复用 recover::journal 的单一事实源 (`history.jsonl` →
 /// `history.1.jsonl`,无扩展名同样成立)。
 fn rotate_and_reopen(path: &Path) -> std::io::Result<std::fs::File> {
@@ -233,9 +233,9 @@ fn open_history_file(path: &Path) -> std::io::Result<std::fs::File> {
         .read(true)
         .append(true)
         .open(path)?;
-    // P3(第十四轮验证):打开时半行定界(照抄 journal open_writer)——
-    // 崩溃落在 write_all 中途会留无 \n 残行,不处理则重启 append 后下一行
-    // 与残行粘死,两条样本一起失效;定界把爆炸半径压回 1 行。
+    // P3(第十四轮验证):打开时半行定界 (照抄 journal open_writer)——
+    // 崩溃落在 write_all 中途会留无 \n 残行，不处理则重启 append 后下一行
+    // 与残行粘死，两条样本一起失效;定界把爆炸半径压回 1 行。
     let len = file.metadata()?.len();
     if len > 0 {
         file.seek(SeekFrom::Start(len - 1))?;
@@ -390,7 +390,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// 重启追加不截断:两次 writer 会话 (模拟 agent 重启) 写同一文件，
+    /// 重启追加不截断：两次 writer 会话 (模拟 agent 重启) 写同一文件，
     /// 前会话行保留，后会话续写追加。
     #[tokio::test]
     async fn restart_appends_without_truncation() {

@@ -12,15 +12,15 @@
 //!   无客户端证书 / 坏 CA 签发的客户端证书 → TLS 握手失败;坏 CA PEM →
 //!   装配期 `Err`;`reqwest::Identity::from_pem` 对 rcgen 产物可用。
 //!
-//! 信任锚统一走 `tls_certs_only`(reqwest 0.13,纯 rustls webpki 校验,仅
+//! 信任锚统一走 `tls_certs_only`(reqwest 0.13，纯 rustls webpki 校验，仅
 //! 本测试 CA):reqwest 0.13 的 `rustls` feature 默认经
-//! rustls-platform-verifier,其 Windows 后端对 `add_root_certificate`
-//! (extra-roots 专属信任引擎)对自签 CA 不可靠 —— reqwest #2941 /
+//! rustls-platform-verifier，其 Windows 后端对 `add_root_certificate`
+//! (extra-roots 专属信任引擎) 对自签 CA 不可靠 —— reqwest #2941 /
 //! rustls-platform-verifier #214(0.7.0 只修了 UNTRUSTED_ROOT 回退一种
 //! 形态)/ #216(open:extra-roots 无平台 CI 覆盖),表现为服务端证书
 //! UnknownIssuer → mTLS 探活恒败 (Windows);macOS/Linux 不受影响。本文件
 //! 不测平台信任库本身 (F32 的「默认客户端拒信」断言覆盖该语义),故测试
-//! 客户端一律绕开平台验证器,行为跨平台一致。
+//! 客户端一律绕开平台验证器，行为跨平台一致。
 //!
 //! control/mod.rs 不可写依赖 (并行开发),ControlShared 全字段 pub，测试自装配。
 
@@ -49,7 +49,7 @@ fn write_self_signed(dir: &Path) -> (PathBuf, PathBuf) {
 
 /// F38:自签测试 CA(rcgen `IsCa::Ca` + Unconstrained 约束),返回 (CA 证书
 /// PEM,Issuer —— 供 [`issue_leaf`] 签发 leaf)。`params.self_signed(&key)`
-/// 先借 key 签根证书,再 move key 进 Issuer(Issuer 只取 DN/key_id/key_usage,
+/// 先借 key 签根证书，再 move key 进 Issuer(Issuer 只取 DN/key_id/key_usage,
 /// 与证书对象解耦)。
 fn test_ca() -> (String, rcgen::Issuer<'static, rcgen::KeyPair>) {
     let mut params =
@@ -61,7 +61,7 @@ fn test_ca() -> (String, rcgen::Issuer<'static, rcgen::KeyPair>) {
     (cert_pem, issuer)
 }
 
-/// F38:用 CA 签发 leaf 证书并落盘,返回 (cert, key) 路径。`san` 可为 DNS 名
+/// F38:用 CA 签发 leaf 证书并落盘，返回 (cert, key) 路径。`san` 可为 DNS 名
 /// 或 IP(rcgen 按 `IpAddr` 解析自动选择 SAN 类型;服务端 leaf 传 `127.0.0.1`,
 /// 客户端 leaf 传任意 DNS 名即可 —— 服务端校验客户端证书不比对 SAN)。
 fn issue_leaf(
@@ -137,7 +137,7 @@ fn insecure_client() -> reqwest::Client {
 /// 先占随机端口探位再放手，https /health 轮询重试 (bind 被抢则换端口重来，
 /// /health 免鉴权恒 200，与 tests/status_page.rs 同一口径)。
 /// F38:`client_ca = Some` 时装配 mTLS(握手要求客户端证书),探活也改用
-/// 带 CA 信任 + 客户端证书的请求(无证书客户端进不来,/health 不再是探位
+/// 带 CA 信任 + 客户端证书的请求 (无证书客户端进不来，/health 不再是探位
 /// 信号 —— 探位与断言用同一把「钥匙」)。
 async fn spawn_tls_server(
     shared: Arc<ControlShared>,
@@ -262,7 +262,7 @@ async fn bad_pem_rejected_at_load() {
 
 /// 成对校验兜底：单边有值 (程序化构造绕过 config validate)→ Err(Config);
 /// 双 None → Ok(None)(纯 HTTP 现状，serve 走 axum::serve 零改动路径)。
-/// F38:`client_ca` 脱离 tls_cert/tls_key 单配同样拒绝(Config)。
+/// F38:`client_ca` 脱离 tls_cert/tls_key 单配同样拒绝 (Config)。
 #[tokio::test]
 async fn tls_paths_must_be_paired() {
     let dir = temp_dir("pair");
@@ -290,17 +290,17 @@ async fn tls_paths_must_be_paired() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// F38 主链路:测试 CA 同签服务端与客户端证书 →
-/// ① 带 `reqwest::Identity` + CA 信任的客户端(monitorctl
-///    `--client-cert/--client-key` 同一构建 API)经 mTLS 到 /health 200;
-/// ② 不带客户端证书(信任服务端 CA)→ TLS 握手失败(服务端要求证书,
+/// F38 主链路：测试 CA 同签服务端与客户端证书 →
+/// ① 带 `reqwest::Identity` + CA 信任的客户端 (monitorctl
+///    `--client-cert/--client-key` 同一构建 API) 经 mTLS 到 /health 200;
+/// ② 不带客户端证书 (信任服务端 CA)→ TLS 握手失败 (服务端要求证书，
 ///    无 HTTP 层交互);
-/// ③ 坏 CA(另一自签 CA)签发的客户端证书 → 握手失败(不可信证书拒绝);
-/// ④ 服务端对 /status 同样可达(mTLS 不改变端点语义,鉴权仍在 HTTP 层);
-///    --insecure + Identity 组合仍成功(P3:跳过服务端校验与携带客户端
-///    证书正交,monitorctl 实际用法);
-/// ⑤ 错误信任锚(rogue CA)→ 服务端证书校验拒绝(tls_certs_only 真实
-///    执行 webpki 校验,非跳过)。
+/// ③ 坏 CA(另一自签 CA) 签发的客户端证书 → 握手失败 (不可信证书拒绝);
+/// ④ 服务端对 /status 同样可达 (mTLS 不改变端点语义，鉴权仍在 HTTP 层);
+///    --insecure + Identity 组合仍成功 (P3:跳过服务端校验与携带客户端
+///    证书正交，monitorctl 实际用法);
+/// ⑤ 错误信任锚 (rogue CA)→ 服务端证书校验拒绝 (tls_certs_only 真实
+///    执行 webpki 校验，非跳过)。
 #[tokio::test]
 async fn mtls_client_cert_required_and_untrusted_rejected() {
     let dir = temp_dir("mtls");
@@ -308,17 +308,17 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
     let ca_path = dir.join("ca.pem");
     std::fs::write(&ca_path, &ca_pem).unwrap();
 
-    // 服务端 leaf:SAN = 127.0.0.1(客户端按 IP URL 连接,webpki 校验 IP SAN)。
+    // 服务端 leaf:SAN = 127.0.0.1(客户端按 IP URL 连接，webpki 校验 IP SAN)。
     let (server_cert, server_key) = issue_leaf(&dir, "server", "127.0.0.1", &issuer);
-    // 客户端 leaf(SAN 任意)与坏 CA 签发的客户端 leaf。
+    // 客户端 leaf(SAN 任意) 与坏 CA 签发的客户端 leaf。
     let (client_cert, client_key) = issue_leaf(&dir, "client", "monitorctl-client", &issuer);
     let (rogue_ca_pem, rogue_issuer) = test_ca();
     let (rogue_cert, rogue_key) = issue_leaf(&dir, "rogue", "rogue-client", &rogue_issuer);
 
-    // 良性客户端:信任 CA + 客户端证书(Identity 构建 mirror monitorctl:
+    // 良性客户端：信任 CA + 客户端证书 (Identity 构建 mirror monitorctl:
     // 证书 + 私钥 PEM 拼接 → Identity::from_pem)。信任锚 `tls_certs_only`
-    // (见文件头「Windows 平台验证器」注):仅本测试 CA,纯 rustls webpki
-    // 校验,跨平台一致。
+    // (见文件头「Windows 平台验证器」注):仅本测试 CA，纯 rustls webpki
+    // 校验，跨平台一致。
     let ca_cert = reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap();
     let mut identity_pem = std::fs::read(&client_cert).unwrap();
     identity_pem.extend_from_slice(&std::fs::read(&client_key).unwrap());
@@ -337,7 +337,7 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
     )
     .await;
 
-    // ① 良性客户端 → /health 200(浅存活,空体)
+    // ① 良性客户端 → /health 200(浅存活，空体)
     let resp = trusted
         .get(format!("{base}/health"))
         .send()
@@ -345,7 +345,7 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
         .expect("mTLS client with trusted certificate must reach");
     assert_eq!(resp.status().as_u16(), 200);
 
-    // ④ /status 同样可达:mTLS 在 TLS 层,不改变 HTTP 端点语义
+    // ④ /status 同样可达:mTLS 在 TLS 层，不改变 HTTP 端点语义
     let resp = trusted
         .get(format!("{base}/status"))
         .send()
@@ -353,18 +353,18 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
         .expect("mTLS client must reach protected endpoint");
     assert_eq!(resp.status().as_u16(), 200);
 
-    // ② 无客户端证书:信任服务端 CA 但不带 Identity → 握手被服务端拒绝
+    // ② 无客户端证书：信任服务端 CA 但不带 Identity → 握手被服务端拒绝
     // (certificate_required alert → 连接错误;有界等待防异常路径挂死)。
-    // tls_certs_only:客户端先通过服务端证书校验,随后的失败必然来自服务端
+    // tls_certs_only:客户端先通过服务端证书校验，随后的失败必然来自服务端
     // 的「要求客户端证书」拒绝 —— 断言语义在 Windows 上同样成立 (否则会被
-    // 平台验证器先拒,撞进同错误类别)。
+    // 平台验证器先拒，撞进同错误类别)。
     let anon = reqwest::Client::builder()
         .tls_certs_only([ca_cert.clone()])
         .build()
         .unwrap();
     let attempt = tokio::time::timeout(Duration::from_secs(5), anon.get(&base).send()).await;
     // P3(第十四轮验证):区分超时与 TLS 拒绝 —— 服务器把无证书连接挂死
-    // 而非发 alert 的回归不得假绿(timeout err 不通过)。
+    // 而非发 alert 的回归不得假绿 (timeout err 不通过)。
     match attempt {
         Err(_) => panic!("handshake hung instead of being rejected with a TLS alert"),
         Ok(Err(e)) => assert!(
@@ -374,7 +374,7 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
         Ok(Ok(resp)) => panic!("anon client unexpectedly got a response: {}", resp.status()),
     }
 
-    // ③ 坏 CA 签发的客户端证书:另一自签 CA 不在信任锚 → 握手拒绝
+    // ③ 坏 CA 签发的客户端证书：另一自签 CA 不在信任锚 → 握手拒绝
     let mut rogue_pem = std::fs::read(&rogue_cert).unwrap();
     rogue_pem.extend_from_slice(&std::fs::read(&rogue_key).unwrap());
     let rogue = reqwest::Client::builder()
@@ -395,9 +395,9 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
         ),
     }
 
-    // ④ P3(第十四轮验证):--insecure(跳过服务端证书校验)与客户端证书
+    // ④ P3(第十四轮验证):--insecure(跳过服务端证书校验) 与客户端证书
     // 正交 —— danger_accept_invalid_certs(true) + Identity 组合必须仍携带
-    // 客户端证书并成功(自签服务端 + mTLS 场景,monitorctl 实际用法)。
+    // 客户端证书并成功 (自签服务端 + mTLS 场景，monitorctl 实际用法)。
     let combo = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .identity(reqwest::Identity::from_pem(&identity_pem).unwrap())
@@ -410,8 +410,8 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
     assert_eq!(resp.status().as_u16(), 200);
 
     // ⑤ 信任锚真实生效:tls_certs_only 换成 rogue CA(与测试 CA 无链)→
-    // 服务端证书校验失败(连接错误)—— 证明 ① 的 200 不以「跳过校验」为
-    // 代价(平台验证器之外的自定义信任锚路径同样执行 webpki 校验)。
+    // 服务端证书校验失败 (连接错误)—— 证明 ① 的 200 不以「跳过校验」为
+    // 代价 (平台验证器之外的自定义信任锚路径同样执行 webpki 校验)。
     let rogue_anchor = reqwest::Client::builder()
         .tls_certs_only([reqwest::Certificate::from_pem(rogue_ca_pem.as_bytes()).unwrap()])
         .identity(reqwest::Identity::from_pem(&identity_pem).unwrap())
@@ -435,7 +435,7 @@ async fn mtls_client_cert_required_and_untrusted_rejected() {
 }
 
 /// F38:坏 CA 材料 → 装配期 `Err`(与 F32 坏服务端证书同列早退):
-/// 垃圾 PEM / 空文件(无证书段);错误含路径、不含文件内容。
+/// 垃圾 PEM / 空文件 (无证书段);错误含路径、不含文件内容。
 #[tokio::test]
 async fn bad_client_ca_rejected_at_load() {
     let dir = temp_dir("badca");
@@ -462,9 +462,9 @@ async fn bad_client_ca_rejected_at_load() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// F38 monitorctl Identity 构建路径(单元级):`reqwest::Identity::from_pem`
-/// 对 rcgen 产物(leaf 证书 PEM + PKCS#8 私钥 PEM 拼接)可用;坏 PEM 拒绝。
-/// monitorctl 无 rcgen dev 依赖,此测试在 monitor-core 侧覆盖同一 API
+/// F38 monitorctl Identity 构建路径 (单元级):`reqwest::Identity::from_pem`
+/// 对 rcgen 产物 (leaf 证书 PEM + PKCS#8 私钥 PEM 拼接) 可用;坏 PEM 拒绝。
+/// monitorctl 无 rcgen dev 依赖，此测试在 monitor-core 侧覆盖同一 API
 /// (`build_client` → `Identity::from_pem`)。
 #[test]
 fn reqwest_identity_accepts_rcgen_pem() {
@@ -473,7 +473,7 @@ fn reqwest_identity_accepts_rcgen_pem() {
     let key = rcgen::KeyPair::generate().unwrap();
     let cert = params.signed_by(&key, &issuer).unwrap();
 
-    // 证书 + 私钥拼接(monitorctl resolve_client_identity 同口径)。
+    // 证书 + 私钥拼接 (monitorctl resolve_client_identity 同口径)。
     let mut pem = cert.pem().into_bytes();
     pem.extend_from_slice(key.serialize_pem().as_bytes());
     reqwest::Identity::from_pem(&pem).expect("rcgen PEM product must build an Identity");

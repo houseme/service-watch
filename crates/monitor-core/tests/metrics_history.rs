@@ -1,8 +1,8 @@
 //! F39 指标历史持久化集成测试 (DESIGN §10 / ROADMAP F39):
 //! - watch 通道直接喂 N 个样本 (不经 axum —— writer 是纯文件出口):
-//!   文件行数 = 首样本 (照写) + N,每行 = `/metrics/history` 单样本对象
+//!   文件行数 = 首样本 (照写) + N，每行 = `/metrics/history` 单样本对象
 //!   (`{"at", "report"}`，report 与发布值逐字段一致);
-//! - 单代轮转:小阈值下 `.1` 保留最新一代 (复用 journal gen1 布局)，
+//! - 单代轮转：小阈值下 `.1` 保留最新一代 (复用 journal gen1 布局)，
 //!   当前文件重建后继续追加;重启追加语义由 src/metrics_history.rs 单测覆盖。
 //!
 //! 无 feature 门控:writer 不依赖 reqwest (纯文件出口，与 metrics push 解耦)，

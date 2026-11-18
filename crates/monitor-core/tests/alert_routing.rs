@@ -619,7 +619,7 @@ async fn custom_headers_reach_both_channels_and_coexist_with_signature() {
     let route_hook = VerifyHookStub::spawn(Some("route-secret".into())).await;
     let default_hook = VerifyHookStub::spawn(Some("global-secret".into())).await;
 
-    // 合并语义与 runtime::effective_route_headers 一致:全局为底,路由级覆盖。
+    // 合并语义与 runtime::effective_route_headers 一致：全局为底，路由级覆盖。
     let mut global = std::collections::BTreeMap::new();
     global.insert("X-Auth-Token".to_string(), "global-secret".to_string());
     global.insert("X-Global-Only".to_string(), "g".to_string());
@@ -695,7 +695,7 @@ async fn custom_headers_reach_both_channels_and_coexist_with_signature() {
         "签名头 (F29) 与自定义头独立共存"
     );
 
-    // 默认通道 (slack):只用全局表,无路由级键;签名头共存。
+    // 默认通道 (slack):只用全局表，无路由级键;签名头共存。
     let default_hits = default_hook.hits();
     assert_eq!(default_hits.len(), 1);
     let hit = &default_hits[0];
@@ -715,7 +715,7 @@ async fn custom_headers_reach_both_channels_and_coexist_with_signature() {
     let _ = task.await;
 }
 
-/// spool 重放带自定义头:注入积压 + headers/secret notifier → 启动重放 →
+/// spool 重放带自定义头：注入积压 + headers/secret notifier → 启动重放 →
 /// stub 断言自定义头与签名同时在 (重放走同一 notifier 实例，F37 天然覆盖)。
 #[cfg(feature = "notify-webhook")]
 #[tokio::test]
