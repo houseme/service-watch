@@ -385,7 +385,7 @@ journal 重放维护 open incident 集合 (Alert/Escalate 开门并刷新 severi
 - 分发使用容量 256 的 AlertQueue，满时在同一临界区丢最旧并计数。每笔投递受 `alert.timeout` 限制，失败按 `retries` 指数退避重试。失败事件进入 spool，重放收到成功确认后原子移除，成功后崩溃可能重复投递。
 - **按目标路由 (F26,`RoutingNotifier`)**:`[[alert.routes]]` 非空时装配路由通知器 (默认通道 = `webhook_url` 作兜底)。匹配按**配置顺序首条生效**:pattern `*` 通配全部 target，否则 target 前缀匹配 (`starts_with`);无匹配走默认通道，空 routes 行为与现状完全一致。路由命中与否不影响投递语义 (超时/退避/队列/spool 由分发层统一处理);route 的 webhook 构建失败该路由跳过并回落默认。**spool 重放走分发任务持有的同一 notifier 实例 → 历史积压按当前启动配置重新路由**。`webhook_url` 为空且无匹配 = 事件不外投 (仍入 journal/日志),与现状「空 = 不投递」口径一致。
 - `WebhookNotifier`:Slack 兼容 payload 与通用 JSON 双格式;`[metrics]` 周期推送已实现 (`alert::metrics_push`,2026-11-13):每 interval POST MetricsReport JSON，失败即放弃 (下轮覆盖),连败边沿写 journal 审计;运行指标亦可经控制面读取。**F34 推送签名**:`[metrics] secret` 配置后每次推送附验签头 (见下方「指标推送 HMAC 签名」)。
-- **目标级静默 (F27,eval 侧实现)**:**范围注记(第十六轮)** —— 抑制点在 eval 的 emit_alert 入队点;**spool 存量事件的重放**(投递失败落盘的历史)不走该管线,不受后设的静默/维护窗口约束(交付后仍会送达接收端)——运维在静默前应清空或接受存量重放;RUNBOOK §3.4 同口径。
+- **目标级静默 (F27,eval 侧实现)**:**范围注记 (第十六轮)** —— 抑制点在 eval 的 emit_alert 入队点;**spool 存量事件的重放**(投递失败落盘的历史) 不走该管线，不受后设的静默/维护窗口约束 (交付后仍会送达接收端)——运维在静默前应清空或接受存量重放;RUNBOOK §3.4 同口径。
 - **目标级静默 (F27,eval 侧实现)**:`POST /v1/silence/{target}`(`{"duration": <秒>, "reason": "<可选>"}`)/ `DELETE` 提前解除 (§9.2)。语义与边界：
   - **只作用于通知管道**:窗口内该 target 的 `category ∈ {Alert, Escalate, Flap}` 事件**不入 AlertQueue**(通知不投递);**`Resolve` 永不静默** —— 恢复通知必须穿透;**Fatal 合成告警 (`check = RECOVER_CHECK`) 同等豁免**(P1 第十轮验证：它不经 tracker，无 trail/renotify 兜底，被吞后解除静默也不补发，「需人工介入」信号会永久丢失)。journal Incident 事件照常写 (历史完整性),检查状态机/恢复 FSM/renotify 窗口推进完全不受影响 —— 与 F20/Fatal 的**恢复行为**无任何耦合 (Fatal 照常闩锁，解除静默不解除 Fatal;豁免的只是 Fatal 闩锁那条**通知**)。
   - **披露 (取舍一致性)**:解除静默后，进行中 incident 的下一通知最多延迟一个 `renotify_interval`(默认 15m —— 抑制期间 tracker 照常推进，被吞通知已刷新 last_notified);静默期内打开并恢复的 incident 会先收到一条此前没有对应 Alert 的 Resolve(Alert 被吞而 Resolve 穿透 —— 与 flap「未通知不发 Resolve」口径不同，运维侧按"恢复即真相"处理)。
@@ -540,12 +540,12 @@ Agent 端点：`GET /health`(浅存活)、`GET /ready`(配置加载成功 + 调�
 - **轮换 = 重启**:证书与私钥加载后驻留内存，不热轮换;换证书重启 agent(与 control 段其余字段「变更要求重启」一致)。
 - **客户端**:monitorctl `--url https://...` 直接可用 (reqwest rustls，与 agent 端同线);全局 `--insecure` 跳过证书校验 (`danger_accept_invalid_certs`),**仅自签/测试场景**,生产走信任链 (自签 CA 安装见 RUNBOOK §1.2d)。
 
-**F38 控制面 mTLS(可选客户端证书校验)**:`[control] client_ca_cert`(PEM 路径,config 校验**强制与 tls_cert/tls_key 同配**)配置后,服务端在 TLS 握手层要求客户端证书 —— 证书须由该 CA(或其下级 CA)签发且在有效期内,否则握手以 alert 失败(客户端表现为连接错误,无 HTTP 层交互);`None` = 不请求客户端证书,F32 行为零改动。
+**F38 控制面 mTLS(可选客户端证书校验)**:`[control] client_ca_cert`(PEM 路径，config 校验**强制与 tls_cert/tls_key 同配**) 配置后，服务端在 TLS 握手层要求客户端证书 —— 证书须由该 CA(或其下级 CA) 签发且在有效期内，否则握手以 alert 失败 (客户端表现为连接错误，无 HTTP 层交互);`None` = 不请求客户端证书，F32 行为零改动。
 
-- **实现**:rustls `WebPkiClientVerifier` 严格 webpki 校验(不 `allow_untrusted`/不 `allow_unauthenticated` —— 后者会退化为「证书可选」),经 `builder_with_provider(roots, provider)` 复用与 HTTPS 同一 provider 选型(进程级 `CryptoProvider::get_default()` 优先,否则局部构造 aws-lc provider,不 `install_default`);ServerConfig 以 `with_client_cert_verifier(..).with_single_cert(..)` 手工构建后交 `RustlsConfig::from_config`(该构造不代设 ALPN,手工补齐 `h2`/`http/1.1`)。CA PEM 解析**严格模式**(任一段失败即拒绝,不做宽容收集;空文件/无证书段 → 装配期 `Err`,与 F32 坏 PEM 同列早退,退出码 2)。
-- **信任链三件套可叠加**:TLS(传输加密)、Bearer token(F23,HTTP 层)、mTLS(F38,TLS 握手层)三者**独立配置、独立叠加** —— 鉴权中间件仍在 TLS 层之后,401 语义不变;mTLS 失败的请求根本到不了 HTTP 层(不会产生 401/403)。典型组合:公网远程运维 = TLS + Bearer + mTLS 全开;本机部署 = 三者皆关(现状)。
-- **客户端**:monitorctl 全局 `--client-cert <PATH>` + `--client-key <PATH>`(**成对必填**,单边 → 启动错误) 经 `reqwest::Identity::from_pem`(reqwest 0.13 rustls 后端唯一 PEM 入口,单 buffer 收集证书段 + PKCS#8/#1/SEC1 私钥段)构建客户端身份,全部子命令共用;与 `--token` 互不排斥。证书生成与运维细则见 RUNBOOK §1.2e。
-- **轮换**:CA 与服务端证书/私钥同列加载驻留内存;轮换(含增删客户端信任)= 重启 agent。
+- **实现**:rustls `WebPkiClientVerifier` 严格 webpki 校验 (不 `allow_untrusted`/不 `allow_unauthenticated` —— 后者会退化为「证书可选」),经 `builder_with_provider(roots, provider)` 复用与 HTTPS 同一 provider 选型 (进程级 `CryptoProvider::get_default()` 优先，否则局部构造 aws-lc provider，不 `install_default`);ServerConfig 以 `with_client_cert_verifier(..).with_single_cert(..)` 手工构建后交 `RustlsConfig::from_config`(该构造不代设 ALPN，手工补齐 `h2`/`http/1.1`)。CA PEM 解析**严格模式**(任一段失败即拒绝，不做宽容收集;空文件/无证书段 → 装配期 `Err`,与 F32 坏 PEM 同列早退，退出码 2)。
+- **信任链三件套可叠加**:TLS(传输加密)、Bearer token(F23,HTTP 层)、mTLS(F38,TLS 握手层) 三者**独立配置、独立叠加** —— 鉴权中间件仍在 TLS 层之后，401 语义不变;mTLS 失败的请求根本到不了 HTTP 层 (不会产生 401/403)。典型组合:公网远程运维 = TLS + Bearer + mTLS 全开;本机部署 = 三者皆关 (现状)。
+- **客户端**:monitorctl 全局 `--client-cert <PATH>` + `--client-key <PATH>`(**成对必填**,单边 → 启动错误) 经 `reqwest::Identity::from_pem`(reqwest 0.13 rustls 后端唯一 PEM 入口，单 buffer 收集证书段 + PKCS#8/#1/SEC1 私钥段) 构建客户端身份，全部子命令共用;与 `--token` 互不排斥。证书生成与运维细则见 RUNBOOK §1.2e。
+- **轮换**:CA 与服务端证书/私钥同列加载驻留内存;轮换 (含增删客户端信任)= 重启 agent。
 
 ### 9.3 退出码
 
@@ -560,12 +560,12 @@ Agent 端点：`GET /health`(浅存活)、`GET /ready`(配置加载成功 + 调�
 - tracing-subscriber:`RUST_LOG`(EnvFilter，默认 `info`)+ `--log-json`。
 - 结构化字段约定：`target` / `check` / `incident`(u64)/ `degraded`(Degradation kind)/ `pid` / `attempt`。
 - 内部计数 (`/metrics` 暴露，eval 每轮发布):告警管道 `alerts_sent` / `alert_delivery_failures` / `alerts_dropped`;探测 `probe_executed` / `probe_skipped`;恢复 `restarts_total` / `state_transitions_total` / `fatal_targets` + 恢复状态分布 gauge(`recovery_running` … `recovery_fatal`);采集 `degradations_current`(瞬时)/ `degradations_events`(无→有跳变)/ `last_collect_at`;概览 `targets_total` / `checks_{ok,warning,critical}` / `services_{total,running}` / `uptime_secs`。
-- **指标历史持久化 (F39,`[metrics] history_path` 可选)**:eval 每轮发布的样本以 JSONL **追加**落盘 —— 独立 writer 任务 (`metrics_history` 顶层模块) 消费 metrics watch 克隆,**eval 零改动、不阻塞单写者** (watch 旁路)。语义与边界：
-  - **行格式 = `/metrics/history` 单样本对象** `{"at": <采样时刻>, "report": <MetricsReport>}`(`model::control::MetricsSample` 的 serde 形态),与该端点响应内的样本对象同构 —— 落盘文件直接按端点语义离线分析;`at` 由 writer 在消费时刻盖戳 (watch 通道不携带采样时刻,与 eval 入环**同轮**、通常亚毫秒偏差;journal 背压时 tick 体内的 await 可放大到毫秒至百毫秒级 —— 第十四轮验证如实化)。
-  - **消费节奏与合并**：watch 每条变更写一行;writer 消费滞后时中间样本被最新值覆盖 (指标是瞬时快照,跳轮可接受,如实记录)。**首样本照写** (不去重):启动时 watch 当前值 (可能是全零默认报告) 也落一行 —— 重启追加不截断,历史跨重启连续。
-  - **轮转 (复用 journal F24 单代模式)**:写**后**实测当前文件尺寸,超 10 MiB → 改名 `<stem>.1.jsonl` (只保留一代,二次轮转覆盖;gen1 路径复用 `recover::journal::gen1_path` 单一事实源);轮转失败 WARN 降级继续写当前文件 (体积上限是运维目标不是安全边界);轮转成功只写 `tracing::info`,**不写 journal audit** (journal 是恢复域,历史文件是观测出口,两域隔离)。
-  - **写入与停机**：append+create 单写者整行写入,写入段无 await 点 —— 停机 abort 只落在 `changed().await`,不截断半行;最后在途样本可能不落盘 (观测数据可接受)。无逐行 fsync (可靠性 = OS 页缓存,崩溃丢尾部可容忍)。打开失败/轮转降级重开失败 → ERROR 后 writer 退出 (持久化静默失效不可取;agent 不因此停机 —— 观测出口非恢复域)。`history_path` 消费不依赖 reqwest,无 feature 门控。
-  - **不做重放/查询** (纯数据出口,分析走 jq/外部工具);外部 copytruncate 兼容 (O_APPEND + 实测尺寸),rename 式外部轮转无效、不得删除主文件 (RUNBOOK §1.2f)。
+- **指标历史持久化 (F39,`[metrics] history_path` 可选)**:eval 每轮发布的样本以 JSONL **追加**落盘 —— 独立 writer 任务 (`metrics_history` 顶层模块) 消费 metrics watch 克隆，**eval 零改动、不阻塞单写者** (watch 旁路)。语义与边界：
+  - **行格式 = `/metrics/history` 单样本对象** `{"at": <采样时刻>, "report": <MetricsReport>}`(`model::control::MetricsSample` 的 serde 形态),与该端点响应内的样本对象同构 —— 落盘文件直接按端点语义离线分析;`at` 由 writer 在消费时刻盖戳 (watch 通道不携带采样时刻，与 eval 入环**同轮**、通常亚毫秒偏差;journal 背压时 tick 体内的 await 可放大到毫秒至百毫秒级 —— 第十四轮验证如实化)。
+  - **消费节奏与合并**：watch 每条变更写一行;writer 消费滞后时中间样本被最新值覆盖 (指标是瞬时快照，跳轮可接受，如实记录)。**首样本照写** (不去重):启动时 watch 当前值 (可能是全零默认报告) 也落一行 —— 重启追加不截断，历史跨重启连续。
+  - **轮转 (复用 journal F24 单代模式)**:写**后**实测当前文件尺寸，超 10 MiB → 改名 `<stem>.1.jsonl` (只保留一代，二次轮转覆盖;gen1 路径复用 `recover::journal::gen1_path` 单一事实源);轮转失败 WARN 降级继续写当前文件 (体积上限是运维目标不是安全边界);轮转成功只写 `tracing::info`,**不写 journal audit** (journal 是恢复域，历史文件是观测出口，两域隔离)。
+  - **写入与停机**：append+create 单写者整行写入，写入段无 await 点 —— 停机 abort 只落在 `changed().await`,不截断半行;最后在途样本可能不落盘 (观测数据可接受)。无逐行 fsync (可靠性 = OS 页缓存，崩溃丢尾部可容忍)。打开失败/轮转降级重开失败 → ERROR 后 writer 退出 (持久化静默失效不可取;agent 不因此停机 —— 观测出口非恢复域)。`history_path` 消费不依赖 reqwest，无 feature 门控。
+  - **不做重放/查询** (纯数据出口，分析走 jq/外部工具);外部 copytruncate 兼容 (O_APPEND + 实测尺寸),rename 式外部轮转无效、不得删除主文件 (RUNBOOK §1.2f)。
 - 日志纪律：恢复/告警/降级三类事件必须 `INFO`+ 可追溯 (含 target 与原因);禁止在热路径 `DEBUG` 刷屏。
 
 ## 11. 测试策略

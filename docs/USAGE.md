@@ -5,7 +5,7 @@
 > [docs/DEPLOYMENT.md](DEPLOYMENT.md); for incident handling, see
 > [docs/RUNBOOK.md](RUNBOOK.md).
 >
-> 双语对照使用指南 (英文 / 中文)。适用 main 分支(0.3.0,含 v0.4-v0.8),语义以 [DESIGN.md](../DESIGN.md)
+> 双语对照使用指南 (英文 / 中文)。适用 main 分支 (0.3.0，含 v0.4-v0.8),语义以 [DESIGN.md](../DESIGN.md)
 > 为准;分平台安装见 [docs/DEPLOYMENT.md](DEPLOYMENT.md),故障处置见
 > [docs/RUNBOOK.md](RUNBOOK.md)。
 

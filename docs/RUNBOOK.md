@@ -1,6 +1,6 @@
 # service-watch RUNBOOK(运维手册)
 
-> 适用版本:main 分支(0.3.0,含 v0.4-v0.8 全部功能;0.x 阶段 minor=功能)。语义以 [DESIGN.md](../DESIGN.md) 为准 (§7 检查/告警、
+> 适用版本:main 分支 (0.3.0，含 v0.4-v0.8 全部功能;0.x 阶段 minor=功能)。语义以 [DESIGN.md](../DESIGN.md) 为准 (§7 检查/告警、
 > §8 恢复、§9 CLI/控制平面、§10 可观测性);部署入口见
 > [docs/deploy/README.md](deploy/README.md)。
 >
@@ -123,11 +123,11 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
 - **私钥纪律**:私钥内容不进日志/错误 (错误仅含路径与解析原因);文件权限
   建议 0600，不要与 agent 同用户之外的可读面共享。
 
-### 1.2e 控制面 mTLS (F38,可选客户端证书)
+### 1.2e 控制面 mTLS (F38，可选客户端证书)
 
 远程运维场景在 HTTPS 之上再加一层客户端证书校验:agent 配置
-`[control] client_ca_cert` 后,TLS 握手要求客户端证书由该 CA 签发 ——
-无证书/不可信证书的客户端直接被握手层拒绝 (连接错误,无 HTTP 交互)。
+`[control] client_ca_cert` 后，TLS 握手要求客户端证书由该 CA 签发 ——
+无证书/不可信证书的客户端直接被握手层拒绝 (连接错误，无 HTTP 交互)。
 **必须与 tls_cert/tls_key 同配**(校验层拒绝单配);未配置 = 行为与 §1.2d
 完全一致。
 
@@ -139,7 +139,7 @@ tls_key = "/etc/service-watch/tls/key.pem"
 client_ca_cert = "/etc/service-watch/tls/client-ca.pem"  # 校验客户端证书的 CA(可含多段证书)
 ```
 
-自签 CA + 客户端证书生成示例 (openssl;CA 可与 §1.2d 服务端证书同一套,
+自签 CA + 客户端证书生成示例 (openssl;CA 可与 §1.2d 服务端证书同一套，
 也可独立 —— 独立 CA 更利于区分「服务端加密」与「客户端准入」两类信任):
 
 ```bash
@@ -157,7 +157,7 @@ chmod 0600 client-ca-key.pem client-key.pem
 ```
 
 - **monitorctl 用法**:全局 `--client-cert <PATH>` + `--client-key <PATH>`
-  **成对必填**(单边 → 启动错误,退出码 2),全部子命令共用:
+  **成对必填**(单边 → 启动错误，退出码 2),全部子命令共用：
 
   ```bash
   monitorctl --url https://127.0.0.1:9170 \
@@ -166,15 +166,15 @@ chmod 0600 client-ca-key.pem client-key.pem
   ```
 
 - **信任链三件套可叠加**:TLS(§1.2d)+ Bearer token(F23,`--token`) +
-  mTLS(F38,`--client-cert/--client-key`)独立配置、独立生效 —— 同时配置
+  mTLS(F38,`--client-cert/--client-key`) 独立配置、独立生效 —— 同时配置
   互不排斥;`--insecure` 只跳过**服务端证书校验**,不影响客户端证书要求
-  (服务端仍会要求证书,mTLS 场景下 `--insecure` 不能替代证书)。
+  (服务端仍会要求证书，mTLS 场景下 `--insecure` 不能替代证书)。
 - **加载失败早退**:CA 文件缺失/坏 PEM/无证书段 → 启动装配期退出码 2(与
-  服务端证书同列);CA 解析为严格模式:证书段逐段校验 (add 失败即拒),非证书段静默跳过,空文件/无证书段拒绝,不做宽容收集。
+  服务端证书同列);CA 解析为严格模式：证书段逐段校验 (add 失败即拒),非证书段静默跳过，空文件/无证书段拒绝，不做宽容收集。
 - **轮换 = 重启**:CA 与证书同列加载驻留内存;增删客户端信任、换 CA、
-  换客户端证书后重启 agent 生效(control 段不走热重载)。
-- **证书有效期**:客户端证书过期后握手即失败,表现为 monitorctl 退出 4
-  (agent unreachable,连接错误) —— 排查时先查 `openssl x509 -enddate`。
+  换客户端证书后重启 agent 生效 (control 段不走热重载)。
+- **证书有效期**:客户端证书过期后握手即失败，表现为 monitorctl 退出 4
+  (agent unreachable，连接错误) —— 排查时先查 `openssl x509 -enddate`。
 
 ### 1.2f 指标历史持久化 ([metrics] history_path,F39)
 
@@ -183,10 +183,10 @@ chmod 0600 client-ca-key.pem client-key.pem
 # history_path = "./data/metrics-history.jsonl"  # 可选;缺省 (不写) = 仅内存环形缓冲 (现状)
 ```
 
-配置后 eval 每轮发布的样本以 JSONL **追加**落盘,一行 =
+配置后 eval 每轮发布的样本以 JSONL **追加**落盘，一行 =
 `GET /metrics/history` 单样本对象 `{"at": ..., "report": {...}}`(at 为
-writer 落盘时刻,report 与该端点样本同构) —— 纯观测数据出口,不做重放/
-查询,分析直接走 jq:
+writer 落盘时刻，report 与该端点样本同构) —— 纯观测数据出口，不做重放/
+查询，分析直接走 jq:
 
 ```bash
 # 逐样本看探测执行数 (与 /metrics/history 相同的行语义)
@@ -198,23 +198,23 @@ jq -c 'select(.report.recovery_fatal > 0)' ./data/metrics-history.jsonl
 
 语义细则 (DESIGN §10):
 
-- **消费模型**:独立 writer 任务消费 metrics watch,不阻塞 eval;watch 滞后
-  时中间样本被最新值覆盖 (极端滞后跳轮,落盘为最新值);启动首行 = watch
-  当前值 (可能是全零默认报告,首样本照写不去重)。
-- **重启追加不截断**:文件以 append 模式打开,agent 重启后继续追加,历史
+- **消费模型**:独立 writer 任务消费 metrics watch，不阻塞 eval;watch 滞后
+  时中间样本被最新值覆盖 (极端滞后跳轮，落盘为最新值);启动首行 = watch
+  当前值 (可能是全零默认报告，首样本照写不去重)。
+- **重启追加不截断**:文件以 append 模式打开，agent 重启后继续追加，历史
   跨重启连续 —— 不要把 history_path 指向会被启动脚本清空的路径。
 - **内置轮转 (单代)**:写后实测尺寸超 **10 MiB** → 当前文件改名
-  `metrics-history.1.jsonl`(只保留一代,二次轮转覆盖)并从零续写,轮转写
-  一条 `tracing::info`(**不写 journal audit** —— 历史文件是观测出口,不是
-  恢复域)。轮转失败 WARN 后继续写当前文件,超限增长直至运维介入。
+  `metrics-history.1.jsonl`(只保留一代，二次轮转覆盖) 并从零续写，轮转写
+  一条 `tracing::info`(**不写 journal audit** —— 历史文件是观测出口，不是
+  恢复域)。轮转失败 WARN 后继续写当前文件，超限增长直至运维介入。
 - **外部轮转工具口径 (与 §6.3 journal 配方的差异)**:copytruncate(清零
-  原文件)兼容 —— O_APPEND 写者 + 写后实测尺寸判断,清零后不会误轮转;
+  原文件) 兼容 —— O_APPEND 写者 + 写后实测尺寸判断，清零后不会误轮转;
   **rename 式**外部轮转 (newsyslog 默认) 无效 —— writer 持 fd 续写旧
-  inode,原路径不出现新文件;外部工具**不得删除/改名 history 主文件本身**
+  inode，原路径不出现新文件;外部工具**不得删除/改名 history 主文件本身**
   (writer 句柄长持)。两者叠加时把 `.1` 一并纳入归档脚本。
 - **可靠性口径**:无逐行 fsync(崩溃丢尾部可容忍);进程崩溃恰逢写入中途
-  可留下残行(概率极低)—— 分析用 `jq -c 'fromjson? // empty'` 容忍。
-  历史文件打不开 (权限/坏路径) → ERROR 后该功能本次运行停用,agent 照常
+  可留下残行 (概率极低)—— 分析用 `jq -c 'fromjson? // empty'` 容忍。
+  历史文件打不开 (权限/坏路径) → ERROR 后该功能本次运行停用，agent 照常
   启动 (观测出口不挡恢复域)。
 
 ## 1.3 Fatal 闩锁处置流程
@@ -510,7 +510,7 @@ fresh 窗口)。
   优先于完整性;投递失败事件的持久化补投已由 F12 落地：`{data_dir}/spool/pending.jsonl`,
   恢复后重放，成功确认后删除，7 天过期)。观察到 dropped 增长 = 事件生产速率
   超过投递能力，先解决 webhook 端点变慢，而不是调大队列。
-- **自定义投递头 (F37)**:`[alert] headers` 与路由级 `headers` 注入任意投递头 (接收方 auth token 等;名 = RFC 7230 token,值 = 可见 ASCII;线上头名全小写);路由级同名键覆盖全局;勿覆盖保留头 (`x-service-watch-signature`/`content-type`/`host`)。
+- **自定义投递头 (F37)**:`[alert] headers` 与路由级 `headers` 注入任意投递头 (接收方 auth token 等;名 = RFC 7230 token，值 = 可见 ASCII;线上头名全小写);路由级同名键覆盖全局;勿覆盖保留头 (`x-service-watch-signature`/`content-type`/`host`)。
 - **按目标路由 (F26)**:`[[alert.routes]]` 按配置顺序首条匹配 target 名称前缀
   (`match = "edge"` 命中 `edge-*`;`match = "*"` 通配全部),未命中回落默认
   `webhook_url`(routes 与默认并存，默认 = 兜底)。路由命中与否不影响超时/退避/
@@ -556,15 +556,15 @@ fresh 窗口)。
   [[alert.routes]]
   match = "edge"
   url = "https://hooks.example.com/edge"
-  headers = { X-Auth-Token = "route-secret", X-Team = "edge" }  # 同名键覆盖全局,非同名键共存
+  headers = { X-Auth-Token = "route-secret", X-Team = "edge" }  # 同名键覆盖全局，非同名键共存
   ```
 
   合并语义 = **路由级同名键覆盖全局**(默认通道用全局表);自定义头与签名头
-  (F29) 独立共存 —— 签名头总是附加,不因同名自定义头丢弃;**不要自定义保留头**
-  `X-Service-Watch-Signature`(会产生两个同名头,多数接收端取第一个或拒绝)。
-  注入面校验 (配置层拒绝,退出码 1):头名必须为非空 RFC 7230 token,值不得为空、
+  (F29) 独立共存 —— 签名头总是附加，不因同名自定义头丢弃;**不要自定义保留头**
+  `X-Service-Watch-Signature`(会产生两个同名头，多数接收端取第一个或拒绝)。
+  注入面校验 (配置层拒绝，退出码 1):头名必须为非空 RFC 7230 token，值不得为空、
   仅可见 ASCII 与 TAB (CR/LF 及其余控制字符拒绝;线上头名归一为小写)。slack/json 两格式与 spool 重放同路径生效;头值可能是
-  敏感 token,只进请求头,不落日志/审计。
+  敏感 token，只进请求头，不落日志/审计。
 
 ## 4. 健康检查端点 (DESIGN §9.2)
 
@@ -637,7 +637,7 @@ Prometheus 文本 (`--prom` / `?format=prometheus`) 与 JSON 字段同名 (前�
 │  └─ 在跑但连不上：
 │      ├─ [control].enabled = false?         → 开启并重启 agent
 │      ├─ listen 与 monitorctl --url 不一致  → 对齐
-│      ├─ HTTPS/mTLS 失败 (exit 4 连接错误)  → agent 配了 tls_cert/client_ca_cert 而本端证书不受信/缺失?按 §1.2d/§1.2e 核对信任链与 --client-cert/--client-key;先查证书有效期
+│      ├─ HTTPS/mTLS 失败 (exit 4 连接错误)  → agent 配了 tls_cert/client_ca_cert 而本端证书不受信/缺失？按 §1.2d/§1.2e 核对信任链与 --client-cert/--client-key;先查证书有效期
 │      ├─ HTTP 401 (F23 鉴权开启)            → monitorctl 加 --token 或设
 │      │                                        SERVICE_WATCH_TOKEN;/health 恒免鉴权
 │      └─ 防火墙 (仅当 listen 改为非回环)    → 收回环或按需放行 (可选 Bearer 令牌：
@@ -705,9 +705,9 @@ journal——安静系统接近零增长。
   logrotate (§6.3) 与内置轮转可共存 (内置轮转按文件实测尺寸判断，外部清零后
   不会误轮转),两者叠加时注意归档脚本把 `journal.1.jsonl` 一并收走。
 - **metrics 历史文件的增长口径 (F39)**:`[metrics] history_path` 开启后每
-  eval tick 落一行 (默认 tick 粒度 1s,单行 ~1 KB) → 满载约 80–90 MB/日,
+  eval tick 落一行 (默认 tick 粒度 1s，单行 ~1 KB) → 满载约 80–90 MB/日,
   内置单代轮转 (10 MiB → `.1`,写后实测尺寸) 是**预期常态**而非异常 ——
-  巡检按「当前文件 + `.1`」两代核对容量,`.1` 归档/压缩/删除随意 (writer
+  巡检按「当前文件 + `.1`」两代核对容量，`.1` 归档/压缩/删除随意 (writer
   只持当前文件句柄)。外部轮转工具口径 (copytruncate 兼容 / rename 式无效 /
   不得删主文件) 与逐日容量估算见 §1.2f。
 

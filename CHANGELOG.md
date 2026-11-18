@@ -5,40 +5,40 @@ Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x
 
 ## [Unreleased]
 
-### 2026-11-18 macOS runner 恢复(macos-14 镜像退役换 macos-15)
+### 2026-11-18 macOS runner 恢复 (macos-14 镜像退役换 macos-15)
 
-- ci.yml test 矩阵 `macos-14` → `macos-15`:macos-14 镜像 2026-11-02 从 GitHub Actions 机队退役(报 `configuration 'macos-14-arm64-us-default' is not supported`;此前「runner 池枯竭」即退役过渡期表现)。
-- release.yml 恢复 darwin 双目标原生构建矩阵(macos-15 arm64 runner,x86_64-apple-darwin 交叉,按暂缓前的原始口径)—— macOS 发布资产自下一 tag 起恢复。
+- ci.yml test 矩阵 `macos-14` → `macos-15`:macos-14 镜像 2026-11-02 从 GitHub Actions 机队退役 (报 `configuration 'macos-14-arm64-us-default' is not supported`;此前「runner 池枯竭」即退役过渡期表现)。
+- release.yml 恢复 darwin 双目标原生构建矩阵 (macos-15 arm64 runner,x86_64-apple-darwin 交叉，按暂缓前的原始口径)—— macOS 发布资产自下一 tag 起恢复。
 
 ## [0.3.0] — 2026-11-18
 
-v0.4-v0.8 全部功能(F23-F39)与第八~十六轮评审修复(第十五/十六轮:F37 头名折叠/跨表校验、history/journal/spool 路径碰撞守卫、文档全面对坑等,均已随本版交付)。**0.x 阶段 minor=功能**;本版含库 API 破坏性变更(见 v0.7 节注记:`run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret` 与第 5 参 `headers`),故 0.2.0 → 0.3.0。
+v0.4-v0.8 全部功能 (F23-F39) 与第八~十六轮评审修复 (第十五/十六轮:F37 头名折叠/跨表校验、history/journal/spool 路径碰撞守卫、文档全面对坑等，均已随本版交付)。**0.x 阶段 minor=功能**;本版含库 API 破坏性变更 (见 v0.7 节注记：`run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret` 与第 5 参 `headers`),故 0.2.0 → 0.3.0。
 
-发布资产仅 Linux x86_64 与 Windows x86_64;macOS 资产暂缓(runner 池枯竭 + 交叉链三方案均不可行,恢复计划见 release.yml 注释)。
+发布资产仅 Linux x86_64 与 Windows x86_64;macOS 资产暂缓 (runner 池枯竭 + 交叉链三方案均不可行，恢复计划见 release.yml 注释)。
 
-### 发布修正(2026-11-18 同日重指 tag 重出产物;初版 Windows 件含下述 P0,已覆盖)
+### 发布修正 (2026-11-18 同日重指 tag 重出产物;初版 Windows 件含下述 P0，已覆盖)
 
-- [P0] **Windows 服务 `sc stop` 死锁于 STOP_PENDING**(第十七轮评审,F36 首跑两次实弹复现):停机 select 的 `REQUEST_NOTIFY.notified()` 分支带 `if REQUESTED` 前置守卫 —— select 驻留时分支被禁用、`notified()` 未注册等待者,`request_shutdown` 的 `notify_one` 只存 permit 不唤醒任务;服务形态无 ctrl_c/eval 等其他唤醒源,runtime 永不进入停机序列。修复:分支恒启用、体内查 `REQUESTED` 过滤残留 permit(unix 与 not(unix) 两分支同构);新增 `tests/inprocess_shutdown.rs` 回归(修复前 10.5s 超时红实证咬合)。
-- 服务停机加固(实弹调试追加):`request_shutdown` 先于 StopPending 报告调用;`run_task.await` 加 30s wait-hint 超时兜底(超时 abort 并按受控停止报告 STOPPED —— SCM 契约优先,操作员显式 stop 不触发 failure 重启)。
+- [P0] **Windows 服务 `sc stop` 死锁于 STOP_PENDING**(第十七轮评审，F36 首跑两次实弹复现):停机 select 的 `REQUEST_NOTIFY.notified()` 分支带 `if REQUESTED` 前置守卫 —— select 驻留时分支被禁用、`notified()` 未注册等待者，`request_shutdown` 的 `notify_one` 只存 permit 不唤醒任务;服务形态无 ctrl_c/eval 等其他唤醒源，runtime 永不进入停机序列。修复：分支恒启用、体内查 `REQUESTED` 过滤残留 permit(unix 与 not(unix) 两分支同构);新增 `tests/inprocess_shutdown.rs` 回归 (修复前 10.5s 超时红实证咬合)。
+- 服务停机加固 (实弹调试追加):`request_shutdown` 先于 StopPending 报告调用;`run_task.await` 加 30s wait-hint 超时兜底 (超时 abort 并按受控停止报告 STOPPED —— SCM 契约优先，操作员显式 stop 不触发 failure 重启)。
 - 服务模式文件日志禁用 ANSI(pretty 色码包裹字段值致 `reason=Clean` 断言失配)。
-- 实机验收:windows-scm 演练全绿(SCM 安装/优雅停机/孤儿/热重载/强杀自愈),ROADMAP Windows 实机验收 ☑。
+- 实机验收:windows-scm 演练全绿 (SCM 安装/优雅停机/孤儿/热重载/强杀自愈),ROADMAP Windows 实机验收 ☑。
 
 ## [0.2.0] — 2026-11-17
 
 第一个 tag 发布 (v0.2 完成门 PASS 后切版本)。v0.1 + v0.2 + v0.3 可实现项全部交付，详见下方各条目与 ROADMAP。
 
-### 2026-11-18 v0.8 功能(可操作性增强)与第十四轮评审修复
+### 2026-11-18 v0.8 功能 (可操作性增强) 与第十四轮评审修复
 
-新增(ROADMAP v0.8,全部默认向后兼容):
+新增 (ROADMAP v0.8，全部默认向后兼容):
 
-- F37 webhook 自定义投递头:`[alert] headers`(全局)+ 路由级 `headers`(同名覆盖全局,签名头独立共存);RFC 7230 token 名 + 可见 ASCII 值校验(与 http crate 字节规则对齐);线上头名小写。
-- F38 控制面 mTLS:`[control] client_ca_cert`(可选)配置后 TLS 握手强制客户端证书(严格 CA 解析);monitorctl `--client-cert/--client-key`(成对);与 `--insecure`/`--token` 正交可叠加。rustls 0.23 直接声明(不新增编译单元,feature 并集与现状一致)。
-- F39 指标历史持久化:`[metrics] history_path`(可选)—— 每样本 JSONL 追加落盘(行 = /metrics/history 单样本对象),10 MiB 单代轮转,重启追加,崩溃残行定界;不做重放/查询(纯数据出口)。
+- F37 webhook 自定义投递头：`[alert] headers`(全局)+ 路由级 `headers`(同名覆盖全局，签名头独立共存);RFC 7230 token 名 + 可见 ASCII 值校验 (与 http crate 字节规则对齐);线上头名小写。
+- F38 控制面 mTLS:`[control] client_ca_cert`(可选) 配置后 TLS 握手强制客户端证书 (严格 CA 解析);monitorctl `--client-cert/--client-key`(成对);与 `--insecure`/`--token` 正交可叠加。rustls 0.23 直接声明 (不新增编译单元，feature 并集与现状一致)。
+- F39 指标历史持久化：`[metrics] history_path`(可选)—— 每样本 JSONL 追加落盘 (行 = /metrics/history 单样本对象),10 MiB 单代轮转，重启追加，崩溃残行定界;不做重放/查询 (纯数据出口)。
 
-修复(第十四轮双专家验证):
+修复 (第十四轮双专家验证):
 
 - [P2] header 值校验漏非 ASCII(is_control 不覆盖 ≥ U+00A0,"café" 通过 config 但被构造期丢弃 → 接收方缺头 401)→ 值校验对齐 http crate 字节规则。
-- [P3] 历史文件打开时半行定界(爆炸半径 2 行 → 1 行);mTLS 握手拒绝测试区分超时与 TLS alert;--insecure+mTLS 组合测试补齐;CA 解析注释如实化(非证书段静默跳过);F37 线上头名小写/保留头警示;F39 时间源措辞如实化;交叉引用修正(§1.2e/§1.2f)。
+- [P3] 历史文件打开时半行定界 (爆炸半径 2 行 → 1 行);mTLS 握手拒绝测试区分超时与 TLS alert;--insecure+mTLS 组合测试补齐;CA 解析注释如实化 (非证书段静默跳过);F37 线上头名小写/保留头警示;F39 时间源措辞如实化;交叉引用修正 (§1.2e/§1.2f)。
 
 ### 2026-11-18 v0.7 功能 (收尾攻坚) 与第十二轮评审修复
 

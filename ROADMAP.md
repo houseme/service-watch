@@ -314,29 +314,29 @@
 
 ### F37 webhook 自定义投递头 ☑ (2026-11-18;`alert.headers`/`routes[].headers` 字段与 RFC 7230/CR-LF/成对校验由主会话先期交付于 config.rs)
 
-- [x] `[alert] headers`(全局)+ 路由级 `headers`：任意自定义头 (接收方 auth token、Grafana/Signoz 类集成);**合并语义 = 路由级同名键覆盖全局**,签名头 (F29) 独立叠加 —— `runtime::effective_route_headers` 纯函数 (全局为底,路由级覆盖,非同名共存);默认通道用全局表;notify 时全部叠加 (构造期一次性转 `HeaderName`/`HeaderValue`,HTTP 非法项 WARN 丢弃只含头名,兜底库直构;签名头总是附加不因同名自定义头丢弃,保留头 `X-Service-Watch-Signature` doc 级警示)
+- [x] `[alert] headers`(全局)+ 路由级 `headers`：任意自定义头 (接收方 auth token、Grafana/Signoz 类集成);**合并语义 = 路由级同名键覆盖全局**,签名头 (F29) 独立叠加 —— `runtime::effective_route_headers` 纯函数 (全局为底，路由级覆盖，非同名共存);默认通道用全局表;notify 时全部叠加 (构造期一次性转 `HeaderName`/`HeaderValue`,HTTP 非法项 WARN 丢弃只含头名，兜底库直构;签名头总是附加不因同名自定义头丢弃，保留头 `X-Service-Watch-Signature` doc 级警示)
 - [x] 注入面校验：header 名必须为 RFC 7230 token、值不得为空/含 CR/LF/控制字符(配置层拒绝 —— 主会话 config.rs + 坏配置测试)
 - [x] slack/json 两格式与 spool 重放同路径生效 (同走 `Notifier::notify`,天然覆盖)
 
-**验收** (2026-11-18 已跑,通过)：单测 —— 合并覆盖语义 (`route_headers_override_global_and_nonconflicting_coexist`)、构造期转换/非法项丢弃 (`custom_headers_collected_and_invalid_dropped`);集成 (tests/alert_routing.rs) —— `custom_headers_reach_both_channels_and_coexist_with_signature` (双 stub:路由级覆盖全局 + 非同名共存 + 签名头共存,json/slack 两格式各走一通道)、`spool_replay_delivers_with_custom_headers_and_signature` (重放带自定义头 + 验签通过)。
+**验收** (2026-11-18 已跑，通过)：单测 —— 合并覆盖语义 (`route_headers_override_global_and_nonconflicting_coexist`)、构造期转换/非法项丢弃 (`custom_headers_collected_and_invalid_dropped`);集成 (tests/alert_routing.rs) —— `custom_headers_reach_both_channels_and_coexist_with_signature` (双 stub:路由级覆盖全局 + 非同名共存 + 签名头共存，json/slack 两格式各走一通道)、`spool_replay_delivers_with_custom_headers_and_signature` (重放带自定义头 + 验签通过)。
 
-### F38 控制面 mTLS ☑ (2026-11-18;**实现侧偏差**:服务端 verifier 需 rustls crate 本体类型 (WebPkiClientVerifier/RootCertStore/ServerConfig,axum-server/reqwest/rustls-pemfile 均无公开 re-export),workspace + monitor-core(control-http feature) 新增 rustls 直接依赖 —— `default-features = false, features = ["std","tls12"]`,provider 经 builder_with_provider 显式传入不 install_default,aws-lc-rs 由 axum-server/reqwest feature 合并提供,不新增编译单元)
+### F38 控制面 mTLS ☑ (2026-11-18;**实现侧偏差**:服务端 verifier 需 rustls crate 本体类型 (WebPkiClientVerifier/RootCertStore/ServerConfig,axum-server/reqwest/rustls-pemfile 均无公开 re-export),workspace + monitor-core(control-http feature) 新增 rustls 直接依赖 —— `default-features = false, features = ["std","tls12"]`,provider 经 builder_with_provider 显式传入不 install_default,aws-lc-rs 由 axum-server/reqwest feature 合并提供，不新增编译单元)
 
-### F38 控制面 mTLS ☑ (2026-11-18;**实现侧偏差**:服务端 verifier 需 rustls crate 本体类型 (WebPkiClientVerifier/RootCertStore/ServerConfig,axum-server/reqwest/rustls-pemfile 均无公开 re-export),workspace + monitor-core(control-http feature) 新增 rustls 直接依赖 —— `default-features = false, features = ["std","tls12"]`,provider 经 builder_with_provider 显式传入不 install_default,aws-lc-rs 由 axum-server/reqwest feature 合并提供,不新增编译单元)
+### F38 控制面 mTLS ☑ (2026-11-18;**实现侧偏差**:服务端 verifier 需 rustls crate 本体类型 (WebPkiClientVerifier/RootCertStore/ServerConfig,axum-server/reqwest/rustls-pemfile 均无公开 re-export),workspace + monitor-core(control-http feature) 新增 rustls 直接依赖 —— `default-features = false, features = ["std","tls12"]`,provider 经 builder_with_provider 显式传入不 install_default,aws-lc-rs 由 axum-server/reqwest feature 合并提供，不新增编译单元)
 
-- [x] `[control] client_ca_cert`(可选，PEM;字段与单配校验由主会话交付于 config.rs):配置后 TLS 握手要求客户端证书 (由该 CA 签发),无证书/不可信证书握手失败 (连接错误,无 HTTP 层交互);必须与 tls_cert/tls_key 同配 (config 校验拒绝单配,`load_tls_config` 程序化兜底 `Err(Config)`)
-- [x] rustls WebPkiClientVerifier (严格 webpki 校验,不 allow_untrusted/unauthenticated;`builder_with_provider` 显式传 provider) + axum-server `RustlsConfig::from_config`(该构造不代设 ALPN,手工补齐 h2/http/1.1);CA PEM 严格解析 (任一段失败即拒,空文件/无证书段 → 装配期早退,与 F32 同列,退出码 2);monitorctl `--client-cert/--client-key`(成对,单边启动错误) 经 `reqwest::Identity::from_pem` (0.13 rustls 后端唯一 PEM 入口;`from_pkcs8_pem` 仅 native-tls 提供) 全命令共用 (OnceLock 注入 build_client,cmd_* 签名零改动)
-- [x] 文档：DESIGN §9.2.2 (mTLS 语义 + 信任链三件套 TLS+Bearer+mTLS 可叠加 —— 鉴权中间件仍在 TLS 层之后,401 语义不变,mTLS 失败到不了 HTTP 层);RUNBOOK §1.2e (client_ca_cert 配置 + openssl CA/客户端证书生成 + monitorctl 用法 + `--insecure` 与 mTLS 的正交语义);DEPLOYMENT control 段 + 速查表 mTLS 行
+- [x] `[control] client_ca_cert`(可选，PEM;字段与单配校验由主会话交付于 config.rs):配置后 TLS 握手要求客户端证书 (由该 CA 签发),无证书/不可信证书握手失败 (连接错误，无 HTTP 层交互);必须与 tls_cert/tls_key 同配 (config 校验拒绝单配，`load_tls_config` 程序化兜底 `Err(Config)`)
+- [x] rustls WebPkiClientVerifier (严格 webpki 校验，不 allow_untrusted/unauthenticated;`builder_with_provider` 显式传 provider) + axum-server `RustlsConfig::from_config`(该构造不代设 ALPN，手工补齐 h2/http/1.1);CA PEM 严格解析 (任一段失败即拒，空文件/无证书段 → 装配期早退，与 F32 同列，退出码 2);monitorctl `--client-cert/--client-key`(成对，单边启动错误) 经 `reqwest::Identity::from_pem` (0.13 rustls 后端唯一 PEM 入口;`from_pkcs8_pem` 仅 native-tls 提供) 全命令共用 (OnceLock 注入 build_client,cmd_* 签名零改动)
+- [x] 文档：DESIGN §9.2.2 (mTLS 语义 + 信任链三件套 TLS+Bearer+mTLS 可叠加 —— 鉴权中间件仍在 TLS 层之后，401 语义不变，mTLS 失败到不了 HTTP 层);RUNBOOK §1.2e (client_ca_cert 配置 + openssl CA/客户端证书生成 + monitorctl 用法 + `--insecure` 与 mTLS 的正交语义);DEPLOYMENT control 段 + 速查表 mTLS 行
 
-**验收** (2026-11-18 已跑,通过)：集成 (tests/tls_control.rs,7 测试) —— rcgen 自签 CA 同签服务端+客户端证书,mTLS 握手成功 (/health 与 /status 200)、无客户端证书握手失败、坏 CA 拒绝、坏 CA PEM/空 CA 装配期 Err (错误含路径不含内容)、`reqwest::Identity::from_pem` 对 rcgen 产物可用 (monitorctl 构建路径单元级);monitorctl 单测 26 过 (flag 解析/成对校验/坏文件错误路径);**二进制端到端** —— 真实 monitor-agent (tls+mTLS+token) + monitorctl:带证书+token status/metrics/journal 200 (exit 0)、无证书/坏 CA 证书 exit 4 (握手失败)、单边 flag exit 2 启动错误、agent 日志确认 `control plane mTLS enabled`。
+**验收** (2026-11-18 已跑，通过)：集成 (tests/tls_control.rs,7 测试) —— rcgen 自签 CA 同签服务端 + 客户端证书，mTLS 握手成功 (/health 与 /status 200)、无客户端证书握手失败、坏 CA 拒绝、坏 CA PEM/空 CA 装配期 Err (错误含路径不含内容)、`reqwest::Identity::from_pem` 对 rcgen 产物可用 (monitorctl 构建路径单元级);monitorctl 单测 26 过 (flag 解析/成对校验/坏文件错误路径);**二进制端到端** —— 真实 monitor-agent (tls+mTLS+token) + monitorctl:带证书+token status/metrics/journal 200 (exit 0)、无证书/坏 CA 证书 exit 4 (握手失败)、单边 flag exit 2 启动错误、agent 日志确认 `control plane mTLS enabled`。
 
-### F39 指标历史持久化 ☑ (2026-11-18;`metrics.history_path` 字段与空路径校验由主会话先期交付于 config.rs;**实现侧偏差**:轮转不写 journal audit —— tracing::info 代替,journal 是恢复域、历史文件是观测出口,两域隔离;停机 = abort+await 收口 (与 metrics pusher 第十二轮同款),写入段无 await 不会截断半行,最后在途样本可能不落盘 —— 详见已知偏差表)
+### F39 指标历史持久化 ☑ (2026-11-18;`metrics.history_path` 字段与空路径校验由主会话先期交付于 config.rs;**实现侧偏差**:轮转不写 journal audit —— tracing::info 代替，journal 是恢复域、历史文件是观测出口，两域隔离;停机 = abort+await 收口 (与 metrics pusher 第十二轮同款),写入段无 await 不会截断半行，最后在途样本可能不落盘 —— 详见已知偏差表)
 
-- [x] `[metrics] history_path`(可选):eval 每轮发布的样本以 JSONL 追加落盘 (一行 = /metrics/history 单个样本对象 `{"at","report"}`,MetricsSample serde 形态);复用 journal 单代轮转模式 (10 MiB → `.1` 保留一代,写后实测尺寸,gen1 路径复用 `recover::journal::gen1_path` 单一事实源;轮转失败 WARN 降级继续)
-- [x] 独立 writer 任务 (`metrics_history` 顶层模块) 消费 metrics watch (eval 零改动、不阻塞单写者;watch 滞后时中间样本被最新值覆盖,首样本照写);重启追加不截断 (append+create);停机 abort+await 位于 metrics pusher 收口之后、journal drop 之前
+- [x] `[metrics] history_path`(可选):eval 每轮发布的样本以 JSONL 追加落盘 (一行 = /metrics/history 单个样本对象 `{"at","report"}`,MetricsSample serde 形态);复用 journal 单代轮转模式 (10 MiB → `.1` 保留一代，写后实测尺寸，gen1 路径复用 `recover::journal::gen1_path` 单一事实源;轮转失败 WARN 降级继续)
+- [x] 独立 writer 任务 (`metrics_history` 顶层模块) 消费 metrics watch (eval 零改动、不阻塞单写者;watch 滞后时中间样本被最新值覆盖，首样本照写);重启追加不截断 (append+create);停机 abort+await 位于 metrics pusher 收口之后、journal drop 之前
 - [x] 重放/查询不做 (纯数据出口，分析走 jq/外部工具)—— 文档明示 (DESIGN §10、RUNBOOK §1.2f、DEPLOYMENT metrics 段)
 
-**验收** (2026-11-18 已跑,通过)：单测 (src/metrics_history.rs,4 测试) —— 轮转 (小阈值,`.1` 只保留一代且内容为最新样本)/续写/禁用轮转 (max_size=0)/重启追加 (两次会话写同一文件);**「坏行隔离」不适用** —— 单写者整行追加、无读回放路径 (打开时亦不做 journal 式半行定界,模块 doc 注明崩溃中途残行概率极低,分析侧容忍);集成 (tests/metrics_history.rs,2 测试,经 metrics watch 通道直接喂样本) —— 产品入口落盘逐行行格式与 `/metrics/history` 样本对象一致 (report 逐字段一致、at 单调)、小阈值轮转 `.1` 保留最新一代;`history_path` 消费无 feature 门控 (三 no-default 组合 check 通过)。
+**验收** (2026-11-18 已跑，通过)：单测 (src/metrics_history.rs,4 测试) —— 轮转 (小阈值，`.1` 只保留一代且内容为最新样本)/续写/禁用轮转 (max_size=0)/重启追加 (两次会话写同一文件);**「坏行隔离」不适用** —— 单写者整行追加、无读回放路径 (打开时亦不做 journal 式半行定界，模块 doc 注明崩溃中途残行概率极低，分析侧容忍);集成 (tests/metrics_history.rs,2 测试，经 metrics watch 通道直接喂样本) —— 产品入口落盘逐行行格式与 `/metrics/history` 样本对象一致 (report 逐字段一致、at 单调)、小阈值轮转 `.1` 保留最新一代;`history_path` 消费无 feature 门控 (三 no-default 组合 check 通过)。
 
 ---
 
@@ -362,7 +362,7 @@
 | F25 拓扑外遗留 incident (检查已从配置删除) 重放后不再恢复 | 仍恢复并重通知一次 (有测试锁定)；`/status` 不展示 (无对应 check 标签),trail 永不 Resolve | 已删除检查的重启时"幽灵告警"是一次性且可观察的，保守漏报比静默丢弃安全;若需静默，先 resolve 再删配置 (F25 验证记录，2026-11-18) |
 | F24 journal 轮转与关键事件 2s 确认预算共享单写线程 | 慢盘环境轮转 (rename+ 重建+audit sync) 与下一关键事件确认共用预算，极端慢盘可能触发 PersistenceFailed 退出 2 | 单写者阻塞模型固有属性;本地 fs 轮转毫秒级，实际风险极低 (rotate_file doc 与 RUNBOOK 注明;第九轮验证 P3 存疑项) |
 | F33 `/v1/config` 反映"当前进程持有的配置"(reload 后即新值) | 初版快照于启动时构造一次、reload 后不刷新;后改为 watch 通道 (`config_view_tx/rx`):eval reload 成功即推送新 redacted JSON，控制面透传;要求重启的段 (control/alert/collect/…) 恒为启动值 | 实现线偏差被第十轮验证指认后由主会话以 watch 通道修复 (2026-11-18);脱敏快照只读透传，明文密钥仍不出 agent |
-| F39 原文「轮转写 audit 语义对齐 F24」「停机 flush 窗口与 journal 同口径」 | 轮转只写 `tracing::info` **不写 journal audit**(journal 是恢复域,历史文件是观测出口,两域隔离);停机 = abort+await 收口 (与 metrics pusher 第十二轮同款:位于 pusher 收口后、journal drop 前),写入段无 await 点不截断半行,最后在途样本可能不落盘 | 观测数据出口不需要恢复域的确认式持久化预算;abort 收口语义与在途 pusher 一致,历史文件为 append-only 观测物,尾部一条样本的丢失可接受 (F39,2026-11-18;DESIGN §10 与 RUNBOOK §1.2f 如实记录) |
+| F39 原文「轮转写 audit 语义对齐 F24」「停机 flush 窗口与 journal 同口径」 | 轮转只写 `tracing::info` **不写 journal audit**(journal 是恢复域，历史文件是观测出口，两域隔离);停机 = abort+await 收口 (与 metrics pusher 第十二轮同款：位于 pusher 收口后、journal drop 前),写入段无 await 点不截断半行，最后在途样本可能不落盘 | 观测数据出口不需要恢复域的确认式持久化预算;abort 收口语义与在途 pusher 一致，历史文件为 append-only 观测物，尾部一条样本的丢失可接受 (F39,2026-11-18;DESIGN §10 与 RUNBOOK §1.2f 如实记录) |
 
 
 ## 2026-11-12 评审驱动交付
@@ -381,7 +381,7 @@
 ### 后续验收与扩展
 
 - [x] **F17 完成门**。固定版本与配置 24h 长跑完成 (1412 采样，RUN3 于 ~/.local/state/sw-soak-24h/20261116-233106/):CPU 均值 0.46%、RSS 稳态增长 176KB(无泄漏指征)、零 ready 失败、exit 130。前两次运行记录:RUN1 /var/tmp 被清理器抹掉 (931 采样，CPU 0.63%)、RUN2 /var/tmp 同因——教训驱动脚本默认目录改持久路径。短时脚本仍保留为快速回归门。—— 2026-11-17
-- [x] **Windows 实机验收**。CI windows runner(windows-scm.yml,9 步演练)全绿:安装(New-Service + 失败恢复动作)、启动 + /ready、服务模式文件日志 + journal spawn 事务、**SCM stop 优雅停机**(STOP_PENDING→STOPPED、/health 下线、in-process shutdown/reason=Clean 标记)、安装幂等、热重载、崩溃自动恢复、失败诊断与清理 —— 2026-11-18(修复链:STOP_PENDING 挂死 → 停机分支先 request_shutdown + 30s 超时兜底 abort;文件日志 ANSI 禁用)。剩余:真实生产机器长周期观察(非 CI 环境)
+- [x] **Windows 实机验收**。CI windows runner(windows-scm.yml,9 步演练) 全绿：安装 (New-Service + 失败恢复动作)、启动 + /ready、服务模式文件日志 + journal spawn 事务、**SCM stop 优雅停机**(STOP_PENDING→STOPPED、/health 下线、in-process shutdown/reason=Clean 标记)、安装幂等、热重载、崩溃自动恢复、失败诊断与清理 —— 2026-11-18(修复链:STOP_PENDING 挂死 → 停机分支先 request_shutdown + 30s 超时兜底 abort;文件日志 ANSI 禁用)。剩余：真实生产机器长周期观察 (非 CI 环境)
 - [x] **原生 Windows Service 目标恢复**。受 SCM 管理的目标类型 (`windows_service` 配置字段，与 command 二选一):启动幂等 (预查询)/ 停止 QueryStatus 确认 / force_kill 如实降级为 Stop / 无进程身份 (on_scm_spawn_ok → Starting,QueryStatus 即 liveness 证据)。三值状态投影 (Running/Stopped/Transitioning)—— 过渡态与查询失败不作死亡证据 (第六轮评审 P1 修复：此前 is_running 抹平三值，慢启动服务被 Stop 掐死直至 Fatal)。`scm-target` feature 门控默认关 (README §8);CI 覆盖交叉编译 + windows runner 测试 (第六轮评审补线)。实机验收并入上方「Windows 实机验收」行。—— 2026-11-13,7 集成测试
 - [x] **崩溃启动事务**。`SpawnIntent`(spawn 前落盘确认，config_digest 绑定定义版本)+ `SpawnOutcome`;重启对账:intent 无 outcome 且 digest 匹配 → 跳过冷启动 + ERROR + Suspect(reset 解除);digest 不匹配照常冷启动。验收断言 (`spawn_intent_is_awaited_and_confirmed_before_process_spawn` 等)+ `JournalState.pending_spawns` 重放 —— 实现在树且测试通过 (第六轮重构时漏勾，2026-11-15 如实修正)
 - [ ] **硬件实机覆盖**。补充 Linux 实际 hwmon 设备与更多 Intel、Apple Silicon 机型证据，保持读数类型、单位和降级一致。

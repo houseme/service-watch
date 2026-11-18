@@ -101,7 +101,7 @@ interval = "10s"
 timeout = "5s"
 ```
 
-`webhook_url` 填写实际 http/https 通知地址后启用通知，Slack 接口可配置 `webhook_format = "slack"`。独立 HTTP 检查产生健康状态和告警。需要把部分目标 (如名称以 `edge` 开头) 的告警发往独立通道时配置 `[[alert.routes]]`(顺序首匹配 target 前缀，`*` 通配全部，无匹配回落 `webhook_url`;spool 积压重放按当前配置路由)。`[agent]` 的 `journal_max_size`(默认 10 MiB,`0` = 禁用) 控制 journal 内置轮转，超限时当前文件改名为 `journal.1.jsonl` (只保留一代) 并继续写。webhook 端点需要验证来源时配置 `[alert] webhook_secret`(HMAC-SHA256 签名，每笔投递附 `X-Service-Watch-Signature` 头;路由可用 `secret` 覆盖全局),接收端验签方法见 RUNBOOK §3.4。webhook 端点需要 auth token 或集成方自定义头时配置 `[alert] headers`(F37:BTreeMap,全局表;路由级 `headers` 同名键覆盖全局、非同名键共存,每笔投递全部附带,与签名头独立共存;头名须为 RFC 7230 token、值非空且无 CR/LF/控制字符;不要自定义保留头 `X-Service-Watch-Signature`;头值不落日志)。控制面需要加密/远程安全访问时，`[control]` 配 `tls_cert` + `tls_key`(PEM 路径，成对必填) 即以纯 HTTPS 监听同一 `listen` 地址 (未配置 = 纯 HTTP 行为不变;明文请求打 TLS 端口只会得到连接错误;证书加载失败启动即退，退出码 2;轮换 = 重启;monitorctl 侧信任链与 `--insecure` 警示见 RUNBOOK §1.2d)。远程运维再加一层准入时配置 `client_ca_cert`(F38 mTLS:PEM 路径，必须与 tls_cert/tls_key 同配) —— TLS 握手要求客户端证书由该 CA 签发，无证书/不可信证书直接被握手层拒绝;monitorctl 用成对的 `--client-cert` + `--client-key` 携带客户端证书 (与 `--token` 可叠加;证书生成示例与运维细则见 RUNBOOK §1.2e)。已知会产生告警的固定时段 (每晚备份、定期批处理) 配置 `[[maintenance]]`(F31:全部时刻按 **UTC**,`start_utc = "HH:MM"` + `duration` ≥ 60s,`days` 缺省每天;窗口内匹配 target 的 Alert/Escalate/Flap 通知被抑制，恢复通知 Resolve 与 Fatal 闩锁告警恒穿透;跨午夜合法，变更需重启;运维细节见 RUNBOOK §1.6):
+`webhook_url` 填写实际 http/https 通知地址后启用通知，Slack 接口可配置 `webhook_format = "slack"`。独立 HTTP 检查产生健康状态和告警。需要把部分目标 (如名称以 `edge` 开头) 的告警发往独立通道时配置 `[[alert.routes]]`(顺序首匹配 target 前缀，`*` 通配全部，无匹配回落 `webhook_url`;spool 积压重放按当前配置路由)。`[agent]` 的 `journal_max_size`(默认 10 MiB,`0` = 禁用) 控制 journal 内置轮转，超限时当前文件改名为 `journal.1.jsonl` (只保留一代) 并继续写。webhook 端点需要验证来源时配置 `[alert] webhook_secret`(HMAC-SHA256 签名，每笔投递附 `X-Service-Watch-Signature` 头;路由可用 `secret` 覆盖全局),接收端验签方法见 RUNBOOK §3.4。webhook 端点需要 auth token 或集成方自定义头时配置 `[alert] headers`(F37:BTreeMap，全局表;路由级 `headers` 同名键覆盖全局、非同名键共存，每笔投递全部附带，与签名头独立共存;头名须为 RFC 7230 token、值非空且无 CR/LF/控制字符;不要自定义保留头 `X-Service-Watch-Signature`;头值不落日志)。控制面需要加密/远程安全访问时，`[control]` 配 `tls_cert` + `tls_key`(PEM 路径，成对必填) 即以纯 HTTPS 监听同一 `listen` 地址 (未配置 = 纯 HTTP 行为不变;明文请求打 TLS 端口只会得到连接错误;证书加载失败启动即退，退出码 2;轮换 = 重启;monitorctl 侧信任链与 `--insecure` 警示见 RUNBOOK §1.2d)。远程运维再加一层准入时配置 `client_ca_cert`(F38 mTLS:PEM 路径，必须与 tls_cert/tls_key 同配) —— TLS 握手要求客户端证书由该 CA 签发，无证书/不可信证书直接被握手层拒绝;monitorctl 用成对的 `--client-cert` + `--client-key` 携带客户端证书 (与 `--token` 可叠加;证书生成示例与运维细则见 RUNBOOK §1.2e)。已知会产生告警的固定时段 (每晚备份、定期批处理) 配置 `[[maintenance]]`(F31:全部时刻按 **UTC**,`start_utc = "HH:MM"` + `duration` ≥ 60s,`days` 缺省每天;窗口内匹配 target 的 Alert/Escalate/Flap 通知被抑制，恢复通知 Resolve 与 Fatal 闩锁告警恒穿透;跨午夜合法，变更需重启;运维细节见 RUNBOOK §1.6):
 
 ```toml
 # [[maintenance]]
@@ -304,7 +304,7 @@ Get-Content C:\service-watch\data\agent.log -Tail 50
 | 本机一次硬件快照 | `monitorctl dump-snapshot` |
 | 指定控制面 | `monitorctl --url http://127.0.0.1:9270 status` |
 | 指定 HTTPS 控制面 | `monitorctl --url https://127.0.0.1:9170 status`(agent 配 `[control] tls_cert/tls_key`;自签需 CA 入信任链，临时测试可 `--insecure`,见 RUNBOOK §1.2d) |
-| mTLS 控制面 | `monitorctl --url https://127.0.0.1:9170 --client-cert client-cert.pem --client-key client-key.pem status`(agent 配 `[control] client_ca_cert`;与 `--token` 可叠加,见 RUNBOOK §1.2e) |
+| mTLS 控制面 | `monitorctl --url https://127.0.0.1:9170 --client-cert client-cert.pem --client-key client-key.pem status`(agent 配 `[control] client_ca_cert`;与 `--token` 可叠加，见 RUNBOOK §1.2e) |
 
 浏览器访问本机状态页，历史指标也可直接查询。
 
