@@ -85,6 +85,13 @@ failure_threshold = 3
 success_threshold = 2
 renotify_interval = "15m"
 
+# 按目标路由 (F26，可选):顺序首匹配 target 名称前缀，* 通配全部;
+# 未命中回落上方 webhook_url。
+# [[alert.routes]]
+# match = "edge"
+# url = "https://hooks.example.com/edge"
+# format = "slack"
+
 [[check]]
 name = "external-api"
 kind = "http"
@@ -94,7 +101,16 @@ interval = "10s"
 timeout = "5s"
 ```
 
-`webhook_url` 填写实际 http/https 通知地址后启用通知，Slack 接口可配置 `webhook_format = "slack"`。独立 HTTP 检查产生健康状态和告警。
+`webhook_url` 填写实际 http/https 通知地址后启用通知，Slack 接口可配置 `webhook_format = "slack"`。独立 HTTP 检查产生健康状态和告警。需要把部分目标 (如名称以 `edge` 开头) 的告警发往独立通道时配置 `[[alert.routes]]`(顺序首匹配 target 前缀，`*` 通配全部，无匹配回落 `webhook_url`;spool 积压重放按当前配置路由)。`[agent]` 的 `journal_max_size`(默认 10 MiB,`0` = 禁用) 控制 journal 内置轮转，超限时当前文件改名为 `journal.1.jsonl` (只保留一代) 并继续写。webhook 端点需要验证来源时配置 `[alert] webhook_secret`(HMAC-SHA256 签名，每笔投递附 `X-Service-Watch-Signature` 头;路由可用 `secret` 覆盖全局),接收端验签方法见 RUNBOOK §3.4。webhook 端点需要 auth token 或集成方自定义头时配置 `[alert] headers`(F37:BTreeMap,全局表;路由级 `headers` 同名键覆盖全局、非同名键共存,每笔投递全部附带,与签名头独立共存;头名须为 RFC 7230 token、值非空且无 CR/LF/控制字符;不要自定义保留头 `X-Service-Watch-Signature`;头值不落日志)。控制面需要加密/远程安全访问时，`[control]` 配 `tls_cert` + `tls_key`(PEM 路径，成对必填) 即以纯 HTTPS 监听同一 `listen` 地址 (未配置 = 纯 HTTP 行为不变;明文请求打 TLS 端口只会得到连接错误;证书加载失败启动即退，退出码 2;轮换 = 重启;monitorctl 侧信任链与 `--insecure` 警示见 RUNBOOK §1.2d)。远程运维再加一层准入时配置 `client_ca_cert`(F38 mTLS:PEM 路径，必须与 tls_cert/tls_key 同配) —— TLS 握手要求客户端证书由该 CA 签发，无证书/不可信证书直接被握手层拒绝;monitorctl 用成对的 `--client-cert` + `--client-key` 携带客户端证书 (与 `--token` 可叠加;证书生成示例与运维细则见 RUNBOOK §1.2e)。已知会产生告警的固定时段 (每晚备份、定期批处理) 配置 `[[maintenance]]`(F31:全部时刻按 **UTC**,`start_utc = "HH:MM"` + `duration` ≥ 60s,`days` 缺省每天;窗口内匹配 target 的 Alert/Escalate/Flap 通知被抑制，恢复通知 Resolve 与 Fatal 闩锁告警恒穿透;跨午夜合法，变更需重启;运维细节见 RUNBOOK §1.6):
+
+```toml
+# [[maintenance]]
+# name = "nightly-backup"       # 可选;缺省 = 审计报 targets
+# targets = ["db-*"]            # target 前缀或 ["*"] = 全部
+# start_utc = "18:30"           # UTC "HH:MM"
+# duration = "30m"              # ≥ 60s
+# days = ["mon", "wed", "fri"]  # 可选;缺省 = 每天
+```
 
 ### 3.2 交给 agent 启动与恢复应用
 
@@ -277,10 +293,18 @@ Get-Content C:\service-watch\data\agent.log -Tail 50
 | 立即探测 | `monitorctl check my-app` |
 | 重启 supervise 目标 | `monitorctl restart my-app` |
 | 清除 Fatal 和预算 | `monitorctl reset my-app` |
+| 部署前静默通知 (30 分钟) | `monitorctl silence my-app --duration 1800 --reason "planned deploy"` |
+| 提前解除静默 | `monitorctl unsilence my-app` |
+| 查询 journal 尾部 (表格) | `monitorctl journal --tail 50` |
+| 查询 journal (过滤 + JSON Lines) | `monitorctl journal --target my-app --type fatal --tail 20 --json` |
 | JSON 指标 | `monitorctl metrics` |
 | Prometheus 指标 | `monitorctl metrics --prom` |
+| 查看生效配置 (表格) | `monitorctl config` |
+| 查看生效配置 (原始 JSON) | `monitorctl config --json` |
 | 本机一次硬件快照 | `monitorctl dump-snapshot` |
 | 指定控制面 | `monitorctl --url http://127.0.0.1:9270 status` |
+| 指定 HTTPS 控制面 | `monitorctl --url https://127.0.0.1:9170 status`(agent 配 `[control] tls_cert/tls_key`;自签需 CA 入信任链，临时测试可 `--insecure`,见 RUNBOOK §1.2d) |
+| mTLS 控制面 | `monitorctl --url https://127.0.0.1:9170 --client-cert client-cert.pem --client-key client-key.pem status`(agent 配 `[control] client_ca_cert`;与 `--token` 可叠加,见 RUNBOOK §1.2e) |
 
 浏览器访问本机状态页，历史指标也可直接查询。
 
@@ -290,7 +314,7 @@ curl -fsS 'http://127.0.0.1:9170/metrics/history?range=300'
 
 状态页地址为 `http://127.0.0.1:9170/`，Prometheus 抓取地址为 `/metrics?format=prometheus`。`/ready` 表示调度已启动，各目标是否健康通过 `/status` 确认。[控制面与告警语义](RUNBOOK.md)
 
-restart、check、reset 返回 202 表示命令已入队，随后通过 status 和 journal 确认执行结果。Fatal 目标的 restart 返回 409，先处理故障再 reset。检查 journal 时可观察 restart、fatal、reset、reset_targets、process_identity、spawn_intent、spawn_outcome 和 audit 事件。
+restart、check、reset 返回 202 表示命令已入队，随后通过 status 和 journal 确认执行结果。Fatal 目标的 restart 返回 409，先处理故障再 reset。silence/unsilence 同样 202 入队：时长越界（0 或超 7 天）与未知目标由 agent 侧拒绝并写审计，静默只抑制 Alert/Escalate/Flap 通知（恢复通知 Resolve 穿透，到点自动过期）。`monitorctl config` 展示 agent 当前持有的生效配置（`GET /v1/config`）：control token 与 webhook 签名密钥以 `***redacted***` 占位（明文不出 agent，该占位不可回灌配置文件），其余字段原样。检查 journal 时可观察 restart、fatal、reset、reset_targets、process_identity、spawn_intent、spawn_outcome 和 audit 事件；`monitorctl journal` 提供经鉴权控制面的尾部查询（含上一代 `journal.1.jsonl` —— gen1 尾部在前、当前文件在后合并，仍不含更早代；更早历史已随轮转覆盖丢弃，直接读盘深查）。
 
 ## 8. 配置热重载
 
@@ -373,4 +397,4 @@ bash docs/deploy/perf-check.sh ./target/release/monitor-agent 60
 
 该脚本用于专门的本机合成负载验收，默认占用控制端口 19190，使用独立临时数据目录。短时通过提供快速回归证据；24 小时长跑完成门（F17）已于 2026-11-17 PASS（1412 采样，CPU 均值 0.46%、RSS 稳态增长 176KB、零 ready 失败、退出码 130），可用 `bash docs/deploy/soak-24h.sh` 复验。
 
-控制面采用本机信任边界，默认监听回环地址。`[metrics]` 周期推送已实现（v0.2）：`enabled = true` 且配置 `url` 后按 `interval` 周期 POST MetricsReport JSON，单次尝试失败即放弃、下轮覆盖，连败边沿写 journal 审计；抓取器更推荐拉模式 `GET /metrics?format=prometheus`。Windows SCM 真机验收与更多硬件机型覆盖继续按 roadmap 跟踪（存储故障演练与崩溃启动事务已于 v0.2 交付，见 ROADMAP）。[后续计划](../ROADMAP.md)
+控制面采用本机信任边界，默认监听回环地址。**可选 Bearer 令牌（F23）**：`[control] token = "..."` 配置后，除 `GET /health`（探活契约，始终免鉴权）外全部端点（含状态页 `GET /`）要求 `Authorization: Bearer <token>`，缺失或错误一律 401；比较为恒定时间实现，token 值不进任何日志或审计。monitorctl 侧用全局 `--token <TOKEN>` 或 `SERVICE_WATCH_TOKEN` 环境变量携带（flag 优先）；agent 未配置 token 时忽略任何 Authorization 头（行为不变）。令牌只是控制面的访问凭据，不是安全边界：`listen` 保持回环、防火墙收紧仍是最外层防线；若必须监听非回环地址，务必同时配置 token 并在网络层限定来源。`[metrics]` 周期推送已实现（v0.2）：`enabled = true` 且配置 `url` 后按 `interval` 周期 POST MetricsReport JSON，单次尝试失败即放弃、下轮覆盖，连败边沿写 journal 审计；推送端点需要验证来源时配置 `[metrics] secret`（F34：HMAC-SHA256 签名，每笔推送附 `X-Service-Watch-Signature` 头，验签方法与 webhook 签名一致，见 RUNBOOK §3.4）；抓取器更推荐拉模式 `GET /metrics?format=prometheus`（鉴权开启时抓取器同样需要携带 token）。需要把指标留存为文件做离线分析时配置 `[metrics] history_path`（F39：JSONL 追加落盘，一行 = `GET /metrics/history` 单样本对象 `{"at","report"}`；独立 writer 任务不阻塞 eval，重启追加不截断，写后实测尺寸超 10 MiB 单代轮转 `metrics-history.1.jsonl`；轮转写 tracing 日志不写 journal 审计；copytruncate 兼容、rename 式外部轮转无效、不得删除主文件；jq 分析示例与运维口径见 RUNBOOK §1.2f）。Windows SCM 真机验收与更多硬件机型覆盖继续按 roadmap 跟踪（存储故障演练与崩溃启动事务已于 v0.2 交付，见 ROADMAP）。[后续计划](../ROADMAP.md)

@@ -14,6 +14,14 @@
 //! (不必只在级别转移时调用):同一级别重复观测由 renotify 间隔判定是否重发，
 //! `Ok` 表示本次观测恢复。两种喂法 (仅转移 / 每轮喂) 均正确;每轮喂才能触发 renotify。
 //!
+//! ## F25 跨重启恢复
+//!
+//! agent 重启时，journal 重放出的仍 open 的 incident 经 [`IncidentTracker::restore`]
+//! 注入引擎 (以「已通知」状态、注入时刻为新 renotify 窗口起点),调用方同步经
+//! 既有 AlertQueue 链路为每起恢复的 incident 产出一条重通知 (类别复用 `Alert`
+//! —— 不新增枚举;reason 前缀 `restored from journal:`)。此后 observe 正常
+//! 收口:Ok 到来 → Resolve(曾通知过);flap 计数器不恢复 (fresh)。
+//!
 //! ## 时钟纪律 (DESIGN §5)
 //!
 //! `now_mono`(单调) 用于一切时长判定 (renotify 间隔、flap 窗口/解除)——
@@ -139,6 +147,57 @@ impl IncidentTracker {
         self.trails.remove(&key);
         self.transitions.remove(&key);
         self.flap_suppressed.remove(&key);
+    }
+
+    // -----------------------------------------------------------------
+    // F25 跨重启恢复
+    // -----------------------------------------------------------------
+
+    /// F25:把 journal 重放出的 open incident 注入引擎 (启动时、调度开始前
+    /// 由 [`crate::eval::Scheduler`] 调用一次)。
+    ///
+    /// 注入口径：
+    /// - trail 以「已通知」状态注入 (`notified = true`,`last_notified = now_mono`)
+    ///   —— 调用方随注入发出的**启动重通知**即新 renotify 窗口起点;
+    /// - `first_seen`/`last_seen` 用重放出的 `last_event_at`(journal 只保留
+    ///   最后一次 alert/escalate 时刻，原始打开时刻不可知 —— 如实取已知值);
+    /// - **flap 计数器不注入**(transitions 环与抑制集保持空):新会话 fresh
+    ///   窗口，旧抖动史不误抑制新告警 (ROADMAP F25 取舍，偏差表已记);
+    /// - key 复算口径与运行期一致:`AlertEvent::incident_key(target, check)`
+    ///   (不信任 journal 持久化的 key 值)。
+    ///
+    /// 返回是否注入 (同 key 已有 trail 时为 `false` —— 防御重复恢复，正常
+    /// 启动时 tracker 为空、恒为 `true`)。
+    pub fn restore(
+        &mut self,
+        now_mono: Instant,
+        last_event_at: SystemTime,
+        target: &str,
+        check: &str,
+        severity: Severity,
+        occurrences: u64,
+    ) -> bool {
+        let key = AlertEvent::incident_key(target, check);
+        if self.trails.contains_key(&key) {
+            return false;
+        }
+        let level = match severity {
+            Severity::Critical => HealthLevel::Critical,
+            Severity::Warning => HealthLevel::Warning,
+        };
+        self.trails.insert(
+            key,
+            IncidentTrail {
+                level,
+                peak: level,
+                occurrences: occurrences.max(1),
+                first_seen: last_event_at,
+                last_seen: last_event_at,
+                notified: true,
+                last_notified: Some(now_mono),
+            },
+        );
+        true
     }
 
     // -----------------------------------------------------------------

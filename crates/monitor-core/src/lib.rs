@@ -9,6 +9,8 @@ pub mod config;
 pub mod control;
 pub mod error;
 pub mod eval;
+/// F39:指标历史持久化 (顶层模块 —— 观测数据出口，不属 alert/恢复域)。
+pub mod metrics_history;
 pub mod model;
 pub mod recover;
 pub mod runtime;

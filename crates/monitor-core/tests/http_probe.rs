@@ -117,6 +117,8 @@ async fn spawn_scheduler(
         ready: false,
         targets: Vec::new(),
     }));
+    let (config_view_tx, _config_view_rx) =
+        tokio::sync::watch::channel(Arc::new(serde_json::Value::Null));
     let handles = SchedulerHandles {
         snapshot_rx: snap_rx,
         alert: queue.clone(),
@@ -128,6 +130,7 @@ async fn spawn_scheduler(
         pm: ProcessManager::new(),
         replayed: Default::default(),
         config_path: Default::default(),
+        config_view_tx,
     };
     let task = tokio::spawn(async move {
         let _ = monitor_core::eval::run(cfg, handles).await;

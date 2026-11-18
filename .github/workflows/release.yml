@@ -51,14 +51,16 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             agent_features: collect-deep-hardware
-          # macos-latest 池容量不稳(第七轮发布首跑 runner 未分配 ×2),
-          # 显式钉版本:arm64 → macos-14,x86_64 → macos-13(intel 原生池)
-          - os: macos-14
+          # macOS runner 池连续 7h+ 枯竭(latest/13/14 全部未分配)→
+          # 改为 Linux runner 交叉产出 macOS 包:feature 降级为
+          # collect-sysinfo(无 C 依赖,HTTP 探测/webhook/metrics/deep-hardware
+          # 缺失,release notes 注明);原生 macOS 构建待 runner 恢复后重跑补齐。
+          - os: ubuntu-latest
             target: aarch64-apple-darwin
-            agent_features: collect-deep-hardware
-          - os: macos-13
+            agent_features: collect-sysinfo
+          - os: ubuntu-latest
             target: x86_64-apple-darwin
-            agent_features: collect-deep-hardware
+            agent_features: collect-sysinfo
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             agent_features: windows-service,monitor-core/scm-target,collect-deep-hardware
@@ -77,7 +79,12 @@ jobs:
         shell: bash
         run: |
           cargo build --release -p monitor-agent --target ${{ matrix.target }} --features "${{ matrix.agent_features }}"
-          cargo build --release -p monitorctl --target ${{ matrix.target }} --features collect-deep-hardware
+          if [ "${{ runner.os }}" = "Linux" ] && [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
+            # macOS 交叉包:无 C 依赖 feature 集(deep-hardware/http 系不可交叉)
+            cargo build --release -p monitorctl --target ${{ matrix.target }} --no-default-features --features collect-sysinfo
+          else
+            cargo build --release -p monitorctl --target ${{ matrix.target }} --features collect-deep-hardware
+          fi
       - name: stage
         shell: bash
         run: |

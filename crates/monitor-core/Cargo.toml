@@ -18,10 +18,15 @@ categories.workspace = true
 default = ["collect-sysinfo", "probe-http", "notify-webhook", "control-http"]
 collect-sysinfo = ["dep:sysinfo"]
 collect-deep-hardware = []
-http-client = ["dep:reqwest"]
+# F34:签名 helper 下沉到 http-client 门控共享层 —— hmac/sha2 随 http-client
+# 拉入 (webhook 投递与 metrics 推送两个消费方共用;纯 Rust，无 C 依赖)。
+http-client = ["dep:reqwest", "dep:hmac", "dep:sha2"]
 probe-http = ["http-client"]
 notify-webhook = ["http-client"]
-control-http = ["dep:axum"]
+# F32:控制面 HTTPS(axum-server 的 rustls acceptor 随 control-http 一同启用)。
+# F38:mTLS 客户端 CA 解析与 WebPkiClientVerifier 随 control-http 一同启用
+# (rustls 本体类型;provider 显式传入,aws-lc-rs 由 axum-server 合并提供)。
+control-http = ["dep:axum", "dep:axum-server", "dep:rustls-pemfile", "dep:rustls"]
 # ROADMAP「原生 Windows Service 目标恢复」:SCM 目标启停/状态查询 (windows.rs 的
 # RealScmOps)。默认不开 → 默认构建零影响;仅在 cfg(windows) 下拉起依赖，
 # 非 Windows 平台启用本 feature 是无害空操作 (运行时诚实降级为错误)。
@@ -39,6 +44,11 @@ async-trait.workspace = true
 sysinfo = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
+axum-server = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -58,3 +68,6 @@ windows-service = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["test-util"] }
 axum.workspace = true
 libc.workspace = true
+serde_json.workspace = true
+# F32:TLS 集成测试内生成自签证书 (纯 Rust，跨平台;openssl CLI 不可依赖)。
+rcgen.workspace = true

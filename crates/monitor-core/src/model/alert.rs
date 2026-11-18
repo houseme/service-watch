@@ -54,6 +54,12 @@ impl AlertEvent {
     }
 }
 
+/// Fatal 闩锁合成告警的 check 名 (incident key = hash(target, "__recover__"),
+/// 任务约定)。共享常量:eval 侧发出 (第九轮评审验证发现)、journal 重放侧
+/// 需要在 Reset/ResetTargets 时闭合该合成 incident 的 open 门 —— 该门属于
+/// 恢复域而非检查告警域 (eval/recover 两域共用，常量下沉到 model)。
+pub const RECOVER_CHECK: &str = "__recover__";
+
 #[cfg(test)]
 mod tests {
     use super::*;

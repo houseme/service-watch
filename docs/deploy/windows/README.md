@@ -107,7 +107,37 @@ Remove-Item -Recurse -Force C:\service-watch    # 含 journal.jsonl 与 data\age
 
 安装脚本配置 `failure actions` 和 `failureflag 1`，覆盖崩溃以及报告 `Stopped` 时携带非零错误码的退出。成功的受控停止保持成功码。修改该 flag 的生效时点按系统文档确认。[Microsoft 失败恢复标志](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_failure_actions_flag)
 
-默认采集与 Windows SCM 模式的 CI 编译线已加入工作流。SCM 安装、启动、停止和失败恢复需要在 Windows 真机验收。本地 macOS 的交叉 `cargo check` 只提供编译证据。
+默认采集与 Windows SCM 模式的 CI 编译线已加入工作流 (cross-check 交叉编译 +
+windows runner 单测)。SCM 安装、启动、停止、优雅停机、热重载、错误退出自动
+恢复与 Job Object 孤儿存活的自动化验收见 §5.1;交互式 console 事件演练与
+真实目标服务场景仍需 Windows 真机人工验收。本地 macOS 的交叉 `cargo check`
+只提供编译证据。
+
+### 5.1 CI SCM 演练 (F36,`.github/workflows/windows-scm.yml`)
+
+windows-latest runner 用**同一份 install-service.ps1**(人工用法零改动，经
+`-InstallDir / -ConfigPath / -DataDir / -ServiceName` 参数化安装) 在每次
+push/PR 上自动演练 SCM 生命周期，断言链：真实脚本安装 (New-Service +
+failure actions + Start-Service + /ready 轮询)→ `sc query` RUNNING
+(binPath 含 `--service-run`、`sc qfailure` restart/5000)→ `GET /health`
+200 → 服务模式文件日志 (启动标记) 与 journal.jsonl(spawn 事务行) 落盘 →
+`sc stop` → 轮询 STOPPED(≤60s,StopPending hint 30s 的 2 倍)→ `/health`
+拒绝连接 (进程确已退出)→ agent.log 停机标记 (`in-process shutdown
+requested` / `shutdown complete` / `reason=Clean`)→ **Job Object 孤儿断言**
+(监督子进程 ping -t 在 agent 退出后必须存活 —— 观察者外置契约)→ 服务已存在
+时重装 fail-fast(脚本 §3 的"已存在"守卫，断言匹配 ASCII 片段 `(state=`
+—— CI runner OEM 代码页 CJK 有损编码免疫)→ `sc delete` → 按"先 delete 再
+install"的文档化重装路径成功 (含 9170 端口重绑)→ **热重载断言**(POST
+/v1/reload 增量拓扑 → `/status` 反映新 check)→ **错误退出恢复**(强杀进程 →
+SCM failure action 自动拉起 → /health 恢复)→ 卸载清理 (失败路径也执行，并
+dump 服务状态/qc/SCM System 事件日志/日志尾部/journal 尾部到 CI 输出)。
+
+**不覆盖**(仍属人工验收):交互式 console 事件演练、真实目标服务场景。
+(原「failure actions 实际触发」已由错误退出恢复断言覆盖;Job Object 的
+存活语义已由孤儿断言覆盖，交互式 console 事件注入除外。)journal 断言口径与实现语义对齐：监督目标
+spawn 事务 (SpawnIntent/SpawnOutcome) 是确定性落盘行;优雅停机不写专门
+journal 行 (drain 窗口超时才写 audit),停机证据 = agent.log 停机标记 +
+SCM STOPPED。
 
 ## 6. 日志与事件查看
 

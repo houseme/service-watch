@@ -7,6 +7,11 @@
 //!   —— 301/303 会把 POST 降级为 GET 投往错误端点);
 //! - 单次尝试，无重试 (指标是可再生的瞬时快照，at-least-once 无意义;
 //!   下一周期自然是最新值 —— "失败即放弃，下轮覆盖"语义);
+//! - F34:`secret` 配置后每次推送附 `X-Service-Watch-Signature:
+//!   sha256=<hex hmac-sha256(body)>` 头 —— 签名对象 = **实际发送的 body
+//!   字节** (先 `serde_json::to_vec` 再签名发送),与 F29 webhook 签名同款
+//!   口径，helper 复用 [`crate::alert::signature`] 共享层;`None` 不加头
+//!   (行为与未签名版本一致);密钥与签名值都不进任何日志/审计;
 //! - 失败行为:WARN 日志 + 连败 **首轮与恢复首轮** 写 journal Audit(粘性边沿，
 //!   不刷屏);连败 ≥3 后每 10 连败再记一条 (长期故障可观测但不淹没日志)。
 
@@ -14,17 +19,20 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
+use crate::alert::signature;
 use crate::model::control::MetricsReport;
 
 /// 连败多少次后进入「每 10 连败一条日志」的降噪模式。
 const STREAK_QUIET_THRESHOLD: u64 = 3;
 const STREAK_QUIET_EVERY: u64 = 10;
 
-/// 指标推送任务。`journal_tx` 为 `None` 时 (测试/无 journal) 仅日志。
+/// 指标推送任务。`journal_tx` 为 `None` 时 (测试/无 journal) 仅日志;
+/// `secret` 为 `None` 时不签名 (F34，行为不变)。
 pub async fn run_metrics_pusher(
     url: url::Url,
     interval: Duration,
     timeout: Duration,
+    secret: Option<String>,
     metrics_rx: watch::Receiver<Arc<MetricsReport>>,
     shutdown: watch::Receiver<bool>,
     journal_tx: Option<crate::recover::journal::JournalSender>,
@@ -60,7 +68,34 @@ pub async fn run_metrics_pusher(
             }
         }
         let report = metrics_rx.borrow().clone();
-        let attempt = client.post(url.clone()).json(&*report).send();
+        // F34:先序列化出**最终发送字节** —— 签名与请求体用同一份字节 (等价
+        // 于 reqwest `.json()` 内部的 serde_json::to_vec，行为等价),接收方按
+        // 收到的原始 body 重算 HMAC 验签必然一致 (与 F29 webhook 同款口径)。
+        // MetricsReport 序列化失败仅计连败不走 panic 路径 (诚实失败面)。
+        let body_bytes = match serde_json::to_vec(&*report) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                fail_streak += 1;
+                on_failure(
+                    &mut journal_audit_active,
+                    fail_streak,
+                    &journal_tx,
+                    &url,
+                    Some(e.to_string()),
+                )
+                .await;
+                continue;
+            }
+        };
+        let mut request = client
+            .post(url.clone())
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        // F34:签名值与密钥都只进请求头，不进任何 tracing 字段;helper 门控
+        // http-client (与 metrics_push 同门控),无 feature 组合回归。
+        if let Some((name, value)) = signature::signature_header(secret.as_deref(), &body_bytes) {
+            request = request.header(name, value);
+        }
+        let attempt = request.body(body_bytes).send();
         // panic 隔离来自任务边界 (JoinError::is_panic，下方 Err 臂)—— 无需
         // AssertUnwindSafe 包装 (第六轮评审微瑕清理)。
         let outcome =
@@ -205,6 +240,7 @@ mod tests {
             url::Url::parse(&format!("http://{addr}/metrics")).unwrap(),
             Duration::from_millis(200),
             Duration::from_secs(2),
+            None,
             metrics_rx,
             shutdown.clone(),
             None,
@@ -242,6 +278,7 @@ mod tests {
             url::Url::parse(&format!("http://{addr}/m")).unwrap(),
             Duration::from_millis(50),
             Duration::from_secs(1),
+            None,
             metrics_rx,
             shutdown.clone(),
             Some(jtx),

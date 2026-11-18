@@ -166,6 +166,11 @@ pub mod dur {
     pub fn default_listen() -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 9170))
     }
+
+    /// F31:维护窗口缺省时长 (1h)。
+    pub fn default_maintenance_duration() -> Duration {
+        Duration::from_secs(3600)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,12 +192,44 @@ pub struct Config {
     pub alert: AlertCfg,
     #[serde(default)]
     pub metrics: MetricsCfg,
+    /// F31:定期维护窗口 (UTC;窗口内匹配 target 的 Alert/Escalate/Flap 通知
+    /// 被抑制，Resolve/Fatal 合成告警恒穿透 —— 语义同 F27 静默)。
+    #[serde(default, rename = "maintenance")]
+    pub maintenance: Vec<MaintenanceCfg>,
     #[serde(default, rename = "check")]
     pub checks: Vec<CheckCfg>,
     #[serde(default, rename = "service")]
     pub services: Vec<ServiceCfg>,
     #[serde(default, rename = "watch")]
     pub watches: Vec<WatchCfg>,
+}
+
+/// F31:单条定期维护窗口。全部时刻按 **UTC** 计算 (std 无时区库，如实取 UTC
+/// —— 运维换算本机时区后配置;不支持 DST)。`start_utc = "HH:MM"`,`days`
+/// 缺省 = 每天;`targets` 前缀匹配同 `[[alert.routes]]`(`*` = 全部)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceCfg {
+    #[serde(default)]
+    pub name: String,
+    pub targets: Vec<String>,
+    pub start_utc: String,
+    #[serde(with = "dur", default = "dur::default_maintenance_duration")]
+    pub duration: Duration,
+    #[serde(default)]
+    pub days: Vec<String>,
+}
+
+impl Default for MaintenanceCfg {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            targets: Vec::new(),
+            start_utc: "00:00".into(),
+            duration: dur::default_maintenance_duration(),
+            days: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,12 +274,21 @@ pub struct ControlCfg {
     pub enabled: bool,
     #[serde(default = "dur::default_listen")]
     pub listen: SocketAddr,
-    /// (F23, reserved) Optional Bearer access token; None = loopback
-    /// trust-boundary behavior unchanged. Once enforced, every endpoint except
-    /// `GET /health` requires `Authorization: Bearer <token>`. Parsed and
-    /// validated only — enforcement wiring lands with F23.
+    /// F23:可选 Bearer 访问令牌;None = 本机信任边界行为不变。配置后除
+    /// `GET /health` 外全部端点要求 `Authorization: Bearer <token>`。
     #[serde(default)]
     pub token: Option<String>,
+    /// F32:TLS 证书与私钥路径 (PEM);两者必须同时配置，配置后控制面以
+    /// HTTPS 监听 (同一 listen 地址)。None = 纯 HTTP(现状不变)。
+    #[serde(default)]
+    pub tls_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub tls_key: Option<PathBuf>,
+    /// F38:可选 mTLS 客户端 CA(PEM)—— 配置后 TLS 握手要求客户端证书
+    /// (由该 CA 签发);必须与 tls_cert/tls_key 同时配置。None = 不校验客户端
+    /// 证书 (现状不变)。
+    #[serde(default)]
+    pub client_ca_cert: Option<PathBuf>,
 }
 
 impl Default for ControlCfg {
@@ -251,6 +297,9 @@ impl Default for ControlCfg {
             enabled: true,
             listen: dur::default_listen(),
             token: None,
+            tls_cert: None,
+            tls_key: None,
+            client_ca_cert: None,
         }
     }
 }
@@ -308,9 +357,14 @@ pub struct AlertCfg {
     pub flap_threshold: u32,
     #[serde(default, deserialize_with = "opt_url_from_str")]
     pub deadman_url: Option<url::Url>,
-    /// (F26, reserved) Per-target routes (sequential first-prefix match; no
-    /// match falls back to `webhook_url`). Parsed and validated only —
-    /// dispatch wiring lands with F26.
+    /// F29:可选 HMAC-SHA256 签名密钥 —— 配置后每次投递附
+    /// `X-Service-Watch-Signature: sha256=<hex>` 头 (接收方恒定时间验签)。
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    /// F37:全局自定义投递头 (接收方 auth token 等);路由级同名键覆盖。
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// F26:按目标路由 (顺序首匹配;无匹配回落 `webhook_url`)。
     #[serde(default)]
     pub routes: Vec<AlertRouteCfg>,
 }
@@ -328,13 +382,14 @@ impl Default for AlertCfg {
             flap_window: dur::default_flap_window(),
             flap_threshold: dur::default_flap_threshold(),
             deadman_url: None,
+            webhook_secret: None,
+            headers: BTreeMap::new(),
             routes: Vec::new(),
         }
     }
 }
 
-/// (F26, reserved) Single alert route. `match` is a target-name prefix;
-/// `*` matches all targets.
+/// F26:单条告警路由。`match` 为 target 名称前缀，`*` 匹配全部 target。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AlertRouteCfg {
@@ -343,6 +398,12 @@ pub struct AlertRouteCfg {
     pub url: url::Url,
     #[serde(default)]
     pub format: WebhookFormat,
+    /// F29:路由级签名密钥;None = 回落 `alert.webhook_secret`(也为 None 则不签名)。
+    #[serde(default)]
+    pub secret: Option<String>,
+    /// F37:路由级自定义投递头 —— 与全局 headers 合并，同名键覆盖全局。
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,6 +418,14 @@ pub struct MetricsCfg {
     /// 单次推送超时 (默认 10s;失败即放弃，下轮覆盖)。
     #[serde(with = "dur", default = "dur::default_alert_timeout")]
     pub timeout: Duration,
+    /// F34:可选 HMAC-SHA256 签名密钥 —— 配置后每次推送附
+    /// `X-Service-Watch-Signature: sha256=<hex>` 头 (语义同 F29 webhook 签名)。
+    #[serde(default)]
+    pub secret: Option<String>,
+    /// F39:可选指标历史持久化路径 (JSONL，每样本一行;复用 journal 的单代
+    /// 轮转模式，达 10 MiB 轮转 .1 保留一代)。None = 仅内存环形缓冲 (现状)。
+    #[serde(default)]
+    pub history_path: Option<PathBuf>,
 }
 
 impl Default for MetricsCfg {
@@ -366,6 +435,8 @@ impl Default for MetricsCfg {
             url: None,
             interval: dur::default_metrics_interval(),
             timeout: dur::default_alert_timeout(),
+            secret: None,
+            history_path: None,
         }
     }
 }
@@ -615,6 +686,30 @@ impl Config {
     }
 
     /// DESIGN.md §4.3 交叉校验。返回全部违规项 (一次性报完，便于用户修正)。
+    /// F33:生效配置视图 —— 敏感字段 (control.token / webhook_secret / 路由级
+    /// secret) 以 `***redacted***` 占位，其余字段原样。供 `GET /v1/config` 与
+    /// monitorctl 使用;序列化输出结构与 TOML schema 一致，占位值不会通过
+    /// 二次校验 (仅供展示，不可回灌)。
+    pub fn redacted(&self) -> Config {
+        let mut cfg = self.clone();
+        if cfg.control.token.is_some() {
+            cfg.control.token = Some("***redacted***".into());
+        }
+        if cfg.alert.webhook_secret.is_some() {
+            cfg.alert.webhook_secret = Some("***redacted***".into());
+        }
+        for route in &mut cfg.alert.routes {
+            if route.secret.is_some() {
+                route.secret = Some("***redacted***".into());
+            }
+        }
+        if cfg.metrics.secret.is_some() {
+            // F34:推送签名密钥与 webhook 同口径 —— 明文不出 /v1/config。
+            cfg.metrics.secret = Some("***redacted***".into());
+        }
+        cfg
+    }
+
     pub fn validate(&self) -> std::result::Result<(), Vec<String>> {
         let mut errs = Vec::new();
         let say = |errs: &mut Vec<String>, msg: String| errs.push(msg);
@@ -899,6 +994,67 @@ impl Config {
             // both are configuration errors.
             say(&mut errs, "control: token must not be blank".into());
         }
+        if self
+            .alert
+            .webhook_secret
+            .as_ref()
+            .is_some_and(|s| s.trim().is_empty())
+        {
+            // F29:空白密钥签出的签名毫无安全性，配置层直接拒绝。
+            say(&mut errs, "alert: webhook_secret must not be blank".into());
+        }
+        if self
+            .metrics
+            .secret
+            .as_ref()
+            .is_some_and(|s| s.trim().is_empty())
+        {
+            // F34:推送签名密钥与 webhook 同口径 —— 空白即配置错误。
+            say(&mut errs, "metrics: secret must not be blank".into());
+        }
+        // F37:投递头注入面 —— 名必须是合法 token(RFC 7230 tchar),值不得含
+        // CR/LF/控制字符(header 注入),空名/空值拒绝。
+        let is_tchar = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
+        let mut check_headers = |where_: &str, hs: &BTreeMap<String, String>| {
+            for (k, v) in hs {
+                if k.is_empty() || !k.chars().all(is_tchar) {
+                    say(
+                        &mut errs,
+                        format!("{where_}: header name {k:?} 必须是非空 RFC 7230 token"),
+                    );
+                }
+                if v.is_empty() || v.chars().any(|c| c == '\r' || c == '\n' || c.is_control()) {
+                    say(
+                        &mut errs,
+                        format!("{where_}: header {k:?} 的值不得为空或含 CR/LF/控制字符"),
+                    );
+                }
+            }
+        };
+        check_headers("alert.headers", &self.alert.headers);
+        for route in &self.alert.routes {
+            check_headers(
+                &format!("alert: routes.headers (match={:?})", route.r#match),
+                &route.headers,
+            );
+        }
+        // F38:mTLS 必须建立在 TLS 之上
+        if self.control.client_ca_cert.is_some() && self.control.tls_cert.is_none() {
+            say(
+                &mut errs,
+                "control: client_ca_cert 必须与 tls_cert/tls_key 同时配置 (mTLS 建立在 HTTPS 之上)"
+                    .into(),
+            );
+        }
+        // F39:历史持久化路径非空
+        if self
+            .metrics
+            .history_path
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty())
+        {
+            say(&mut errs, "metrics: history_path 不能为空路径".into());
+        }
         if self.alert.failure_threshold == 0
             || self.alert.success_threshold == 0
             || self.alert.flap_threshold == 0
@@ -941,6 +1097,76 @@ impl Config {
                     ),
                 );
             }
+            if route.secret.as_ref().is_some_and(|s| s.trim().is_empty()) {
+                say(
+                    &mut errs,
+                    format!(
+                        "alert: routes.secret must not be blank (match={:?})",
+                        route.r#match
+                    ),
+                );
+            }
+        }
+        // F31:维护窗口校验 (UTC 手工解析;std 无时区库，如实限定 UTC)
+        for m in &self.maintenance {
+            if m.targets.is_empty() {
+                say(
+                    &mut errs,
+                    format!(
+                        "maintenance {:?}: targets must not be empty(显式 [\"*\"] 表示全部)",
+                        m.name
+                    ),
+                );
+            }
+            let parts: Vec<&str> = m.start_utc.split(':').collect();
+            let hhmm_ok = parts.len() == 2
+                && parts
+                    .iter()
+                    .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_digit()))
+                && parts[0].parse::<u8>().map(|h| h < 24).unwrap_or(false)
+                && parts[1].parse::<u8>().map(|mi| mi < 60).unwrap_or(false);
+            if !hhmm_ok {
+                say(
+                    &mut errs,
+                    format!("maintenance {:?}: start_utc must be UTC \"HH:MM\"", m.name),
+                );
+            }
+            if m.duration < Duration::from_secs(60) {
+                say(
+                    &mut errs,
+                    format!(
+                        "maintenance {:?}: duration must be >= 60s(过短窗口在采集/tick 粒度下形同虚设)",
+                        m.name
+                    ),
+                );
+            }
+            const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+            for d in &m.days {
+                let day = d.trim().to_ascii_lowercase();
+                if !WEEKDAYS.contains(&day.as_str()) {
+                    say(
+                        &mut errs,
+                        format!(
+                            "maintenance {:?}: days 含非法值 {day:?}(合法：mon tue wed thu fri sat sun)",
+                            m.name
+                        ),
+                    );
+                }
+            }
+        }
+        // F32:TLS 证书/私钥成对校验
+        match (
+            self.control.tls_cert.as_ref(),
+            self.control.tls_key.as_ref(),
+        ) {
+            (Some(_), Some(_)) => {}
+            (Some(_), None) | (None, Some(_)) => {
+                say(
+                    &mut errs,
+                    "control: tls_cert / tls_key 必须同时配置 (或都不配 = 纯 HTTP)".into(),
+                );
+            }
+            (None, None) => {}
         }
         if self.collect.interval < Duration::from_millis(100) {
             say(
@@ -1109,8 +1335,22 @@ mod tests {
             "[alert]\nretries = 101",
             "[[watch]]\nname='w'\npidfile=''",
             "[control]\ntoken = ' '",
+            "[alert]\nwebhook_secret = ' '",
+            "[metrics]\nenabled = true\nurl = 'http://ep/push'\nsecret = ' '",
+            "[alert]\nheaders = { 'X-Auth' = '' }",
+            "[alert]\nheaders = { 'Bad Header' = 'v' }",
+            "[alert]\nheaders = { 'X-Inj' = \"line1\\nline2\" }",
+            "[control]\nclient_ca_cert = 'ca.pem'",
+            "[metrics]\nhistory_path = ''",
+            "[[maintenance]]\ntargets = []\nstart_utc = '02:00'",
+            "[[maintenance]]\ntargets = ['*']\nstart_utc = '24:00'",
+            "[[maintenance]]\ntargets = ['*']\nstart_utc = '2:00'",
+            "[[maintenance]]\ntargets = ['*']\nstart_utc = '02:00'\nduration = '30s'",
+            "[[maintenance]]\ntargets = ['*']\nstart_utc = '02:00'\ndays = ['moon']",
+            "[control]\ntls_cert = 'cert.pem'",
             "[alert]\n[[alert.routes]]\nmatch = 'edge'\nurl = 'ftp://ep/hook'",
             "[alert]\n[[alert.routes]]\nmatch = ' '\nurl = 'http://ep/hook'",
+            "[alert]\n[[alert.routes]]\nmatch = 'edge'\nurl = 'http://ep/hook'\nsecret = ' '",
             "[[service]]\nname='app'\ncommand='app'\n[service.activate]\ncommand='hook'\nurl='http://localhost/hook'",
             "[[service]]\nname='app'\ncommand='app'\n[service.activate]\ncommand=' '",
             "[[service]]\nname='app'\ncommand='app'\n[service.activate]\nurl='ftp://localhost/hook'",
@@ -1138,6 +1378,48 @@ mod tests {
         assert_eq!(cfg.alert.routes.len(), 1);
         assert_eq!(cfg.alert.routes[0].r#match, "edge-*");
         assert!(matches!(cfg.alert.routes[0].format, WebhookFormat::Slack));
+    }
+
+    /// v0.6 基座:F31 维护窗口解析 / F32 TLS 成对字段 / F33 redaction。
+    #[test]
+    fn parses_v06_fields_and_redacts_secrets() {
+        let cfg = Config::from_toml_str(
+            "[control]\ntls_cert = 'c.pem'\ntls_key = 'k.pem'\ntoken = 'tok'\n\
+             [alert]\nwebhook_secret = 'sec'\n[[alert.routes]]\nmatch = 'edge'\nurl = 'http://e/h'\nsecret = 'rs'\n\
+             [metrics]\nenabled = true\nurl = 'http://p/ingest'\nsecret = 'push'\n\
+             [[maintenance]]\nname = 'nightly'\ntargets = ['*']\nstart_utc = '18:30'\nduration = '30m'\ndays = ['mon', 'fri']",
+        )
+        .unwrap();
+        assert_eq!(cfg.control.tls_cert, Some(PathBuf::from("c.pem")));
+        assert_eq!(cfg.control.tls_key, Some(PathBuf::from("k.pem")));
+        assert_eq!(cfg.maintenance.len(), 1);
+        let m = &cfg.maintenance[0];
+        assert_eq!(m.name, "nightly");
+        assert_eq!(m.targets, vec!["*"]);
+        assert_eq!(m.start_utc, "18:30");
+        assert_eq!(m.duration, Duration::from_secs(1800));
+        assert_eq!(m.days, vec!["mon", "fri"]);
+
+        let r = cfg.redacted();
+        assert_eq!(r.control.token.as_deref(), Some("***redacted***"));
+        assert_eq!(r.alert.webhook_secret.as_deref(), Some("***redacted***"));
+        assert_eq!(r.alert.routes[0].secret.as_deref(), Some("***redacted***"));
+        assert_eq!(r.metrics.secret.as_deref(), Some("***redacted***"));
+        assert!(
+            !serde_json::to_string(&r).unwrap().contains("push"),
+            "明文推送密钥不得出现在视图"
+        );
+        assert_eq!(
+            r.control.tls_cert,
+            Some(PathBuf::from("c.pem")),
+            "非敏感字段 redaction 后原样"
+        );
+
+        // 缺省 (不配置) 零行为变化
+        let empty = Config::from_toml_str("").unwrap();
+        assert!(empty.maintenance.is_empty());
+        assert_eq!(empty.control.tls_cert, None);
+        assert_eq!(empty.control.tls_key, None);
     }
 
     #[test]

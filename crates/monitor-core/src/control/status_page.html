@@ -2,8 +2,10 @@
 <!--
   F22 service-watch 只读状态页 (经 include_str! 编译期嵌入 agent 控制平面，GET /)。
   零外部依赖：无 CDN/字体/图标/框架,内联 CSS 与 JS。
-  页面严格只读：不提供任何写操作入口;数据仅来自 GET /status 与 GET /metrics(JSON)。
-  安全约定：所有插值一律经 escapeHtml(target 名等来自配置，可能含 <>'"&)。
+  页面严格只读：不提供任何写操作入口;数据仅来自 GET /status、GET /metrics(JSON)
+  与 GET /metrics/history(F30 历史迷你图，fetch 失败不影响前两者渲染)。
+  安全约定：所有插值一律经 escapeHtml(target 名等来自配置，可能含 <>'"&);
+  迷你图折线点坐标全部由 num() 防护后的数字计算，不含任何文本插值。
 -->
 <html lang="en">
 <head>
@@ -84,6 +86,18 @@
   td.empty, .dim { color: var(--muted); }
   tr:last-child td { border-bottom: none; }
   tr.row-fatal td { background: rgba(248, 81, 73, .12); }
+  /* F30 历史迷你图：零依赖 SVG 折线 (viewBox 固定，容器宽度自适应)。 */
+  .spark { display: block; width: 100%; height: 48px; margin-top: 4px; }
+  .spark .spark-line {
+    stroke: var(--crit);
+    stroke-width: 1.5;
+    fill: none;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+  .spark.fatal .spark-line { stroke: var(--fatal-bg); }
+  .spark .spark-baseline { stroke: var(--border); stroke-width: 1; }
+  .spark-meta { font-size: 11px; margin-top: 2px; }
   .badge {
     display: inline-block;
     padding: 1px 9px;
@@ -136,6 +150,22 @@
 </section>
 
 <section class="panel">
+  <h2>history &middot; last 5 minutes</h2>
+  <div class="grid">
+    <div class="cell">
+      <div class="label">checks critical</div>
+      <svg id="spark-critical" class="spark" viewBox="0 0 240 48" preserveAspectRatio="none" role="img" aria-label="checks critical, last 5 minutes"></svg>
+      <div class="spark-meta dim" id="spark-critical-meta">&mdash;</div>
+    </div>
+    <div class="cell">
+      <div class="label">recovery fatal</div>
+      <svg id="spark-fatal" class="spark fatal" viewBox="0 0 240 48" preserveAspectRatio="none" role="img" aria-label="recovery fatal, last 5 minutes"></svg>
+      <div class="spark-meta dim" id="spark-fatal-meta">&mdash;</div>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
   <h2>targets</h2>
   <table>
     <thead>
@@ -149,7 +179,7 @@
   </table>
 </section>
 
-<footer>auto-refreshes every 2s &middot; data: GET /status, GET /metrics</footer>
+<footer>auto-refreshes every 2s &middot; data: GET /status, GET /metrics, GET /metrics/history?range=300</footer>
 <noscript><p class="dim">JavaScript is required for live data.</p></noscript>
 
 <script>
@@ -157,6 +187,9 @@
   "use strict";
 
   var REFRESH_MS = 2000;
+  // F30 历史迷你图窗口 (秒):与 /metrics/history 缺省 range 一致。
+  var HISTORY_RANGE = 300;
+  var SVG_NS = "http://www.w3.org/2000/svg";
   var ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
   // 所有插值 (名称/模式/级别等来自配置，可能含 <>"'&) 必须经此转义，防 XSS。
@@ -233,6 +266,78 @@
     el("target-rows").innerHTML = rows;
   }
 
+  // ---- F30 历史迷你图 (/metrics/history，零依赖 SVG 折线) ----
+
+  // 用折线点集重绘一个迷你图;values 为空 → 清空容器并保留灰 (不渲染)。
+  // 折线坐标全部由 num() 防护后的数字计算，经 setAttribute 写入 —— 无文本插值，
+  // 不需要 escapeHtml (延续 XSS 纪律)。
+  function drawSpark(svgId, metaId, values) {
+    var svg = el(svgId);
+    var meta = el(metaId);
+    if (!svg || !meta) { return; }
+    while (svg.firstChild) { svg.removeChild(svg.firstChild); }
+    if (!values.length) { meta.textContent = "\u2014"; return; }
+    var W = 240, H = 48, PAD = 2;
+    var max = 1;      // 绘图刻度下限 1 (防除零)
+    var dataMax = 0;  // meta 行展示数据真实最大值 (全零序列标 "max 1" 有误导)
+    var min = Infinity;
+    for (var i = 0; i < values.length; i++) {
+      var v = num(values[i]);
+      max = Math.max(max, v);
+      dataMax = Math.max(dataMax, v);
+      min = Math.min(min, v);
+    }
+    // 恒定非零序列 (max===min):整条画中线,避免被误读为"贴顶打满";
+    // 全 0 序列 (max=1,min=0 不相等) 仍落基线。
+    var flat = (max === min);
+    var last = values.length - 1;
+    var points = [];
+    for (var i = 0; i < values.length; i++) {
+      // 样本按时间升序 (环形缓冲快照保序):左旧右新;单点画在中线。
+      var x = (last === 0) ? W / 2 : PAD + (W - 2 * PAD) * (i / last);
+      var y = flat ? (H - 2 * PAD) / 2 + PAD
+                   : H - PAD - (H - 2 * PAD) * (num(values[i]) / max);
+      points.push(x.toFixed(1) + "," + y.toFixed(1));
+    }
+    var baseline = document.createElementNS(SVG_NS, "line");
+    baseline.setAttribute("x1", PAD);
+    baseline.setAttribute("y1", H - PAD);
+    baseline.setAttribute("x2", W - PAD);
+    baseline.setAttribute("y2", H - PAD);
+    baseline.setAttribute("class", "spark-baseline");
+    svg.appendChild(baseline);
+    var line = document.createElementNS(SVG_NS, "polyline");
+    line.setAttribute("points", points.join(" "));
+    line.setAttribute("class", "spark-line");
+    svg.appendChild(line);
+    // 最值标注:max 与最新值 (数字经 num() 防护,textContent 不涉 HTML 插值)。
+    meta.textContent = "max " + num(dataMax) + " \u00b7 now " + num(values[last])
+      + " \u00b7 " + values.length + " pts";
+  }
+
+  // 响应结构 {"samples":[{at, report:{checks_critical, recovery_fatal,...}}], "count":N}
+  // (MetricsHistory/MetricsSample,DESIGN §9.2):抽两条序列画双迷你图。
+  function renderHistory(history) {
+    var samples = (history && history.samples) || [];
+    var crit = [];
+    var fatal = [];
+    for (var i = 0; i < samples.length; i++) {
+      var report = (samples[i] && samples[i].report) || {};
+      crit.push(num(report.checks_critical));
+      fatal.push(num(report.recovery_fatal));
+    }
+    drawSpark("spark-critical", "spark-critical-meta", crit);
+    drawSpark("spark-fatal", "spark-fatal-meta", fatal);
+  }
+
+  // 独立链路:历史接口失败/超时不影响 status/metrics 渲染,也不改变可达徽章
+  // (清空折线保留灰,不画误导性的旧数据)。
+  function refreshHistory() {
+    fetchJson("/metrics/history?range=" + HISTORY_RANGE)
+      .then(renderHistory)
+      .catch(function () { renderHistory(null); });
+  }
+
   function render(status, metrics) {
     setChip(
       el("ready"),
@@ -268,6 +373,8 @@
   }
 
   function refresh() {
+    // F30:历史独立拉取 —— 失败不阻塞 status/metrics 渲染与可达徽章。
+    refreshHistory();
     return Promise.all([fetchJson("/status"), fetchJson("/metrics")])
       .then(function (results) {
         render(results[0], results[1]);

@@ -11,6 +11,69 @@ Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x
 
 ## [Unreleased]
 
+### 2026-11-18 v0.7 功能 (收尾攻坚) 与第十二轮评审修复
+
+新增 (ROADMAP v0.7，全部默认向后兼容;**注意：库 API 有破坏性变更**,发布前需 bump 0.3.0 —— `run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret`):
+
+- F34 指标推送 HMAC 签名：`[metrics] secret` 配置后推送附 `X-Service-Watch-Signature: sha256=<hex>`(与 F29 webhook 签名同口径);签名 helper 下沉 `alert/signature.rs`(http-client 门控共享层，hmac/sha2 随 http-client 拉入)。
+- F35 journal 查询覆盖轮转上一代：`GET /v1/journal` 当 `journal.1.jsonl` 存在时合并尾读 (gen1 在前，时间序);读失败并入 `truncated=true`(保守口径);monitorctl 零改动。
+- F36 Windows runner SCM 实机演练:CI 新作业在 windows-latest 上用真实 install-service.ps1 安装服务 → RUNNING → /health → spawn 事务 (pid_confirmed:true)→ sc stop 优雅退出 (reason=Clean)→ **Job Object 孤儿断言 (监督子进程存活)** → 幂等两段 → **热重载断言 (POST /v1/reload → /status)** → **错误退出自愈 (强杀 → SCM failure action 拉起 → health 恢复)** → 清理;rust-cache + timeout 30min + 诊断覆盖 cancelled 与 SCM 事件日志。**CI 首跑绿待 push 后验证**。
+- 硬件实机覆盖 (部分):Apple Silicon 实机证据已采集 (本机 darwin arm64,2 风扇 RPM/电压/17 温度传感器，VBUS 无效读数机读降级);Linux hwmon/Intel 仍需真机。
+
+修复 (第十二轮双专家验证):
+
+- [P1] `Config::redacted()` 漏 `[metrics].secret` —— /v1/config 与 monitorctl config 泄明文推送密钥 → 补脱敏 + 两处测试锁定。
+- [P1] windows-scm 幂等断言匹配中文消息 —— CI runner OEM 代码页 CJK 有损编码必然假红 → 改匹配 ASCII 片段 `(state=`。
+- [P2] journal gen1 读失败 truncated 不置位 (响应看似完整却缺整代历史)→ 读失败并入 truncated=true;[P2] spawn_outcome 不证明 spawn 成功 (失败也落盘)→ 断言 pid_confirmed:true;[P2] 无缓存 release 构建 timeout 偏紧 → rust-cache + 30min。
+- [P3] gen1_path 双处实现去重 (journal.rs pub(crate),control 委托);diagnostics 覆盖 cancelled + SCM System 事件日志;三 workflow permissions 显式化;孤儿化措辞修正。
+
+### 2026-11-18 v0.6 功能 (远程可信与运维节奏) 与第十一轮评审修复
+
+新增 (ROADMAP v0.6，全部默认向后兼容):
+
+- F31 定期维护窗口：`[[maintenance]]`(UTC 时刻/星期/前缀 targets，跨 midnight 精确);窗口内 Alert/Escalate/Flap 通知抑制 (复用 F27 管线，Resolve/Fatal 恒穿透),开/关 Audit 边沿恰好一次;判定纯函数 (手工 UTC 历法，1970→2100 对拍)。
+- F32 控制面 HTTPS:`[control] tls_cert`/`tls_key`(成对) → axum-server rustls 同端口 HTTPS;加载失败装配期早退 (退出码 2);monitorctl `--url https://...` 可用 + `--insecure`(自签/测试场景);TLS 加载与 bind 同受 control.enabled 门控。
+- F33 生效配置查看：`GET /v1/config` + monitorctl `config [--json]` —— **合并视图**(拓扑段随 reload 刷新，要求重启的段恒为启动值),token/签名密钥 `***redacted***` 占位不可回灌。
+
+修复 (第十一轮双专家验证):
+
+- [P1] reload diff_sections 漏 maintenance 段 —— 窗口变更 reload 零审计，运维无从得知新窗口未生效 → 补列 + 单测。
+- [P2] /v1/config 初版推整份新文件 —— reload 后把未生效的 control/alert/collect/maintenance 值展示成已生效 → 改合并视图 (watch 通道 `config_view_tx/rx`,eval reload 成功即推送)。
+- [P3] TLS 加载不受 control.enabled 门控;DESIGN F33 过时偏差描述;RUNBOOK 证书链 leaf-first 说明;F31 墙钟跳变下 Audit 边沿形态如实限定;状态页 meta 行显示数据真实最大值 (全零序列不再误导性显示 "max 1")。
+- F30 状态页人工目验完成 (浏览器实测：全零序列贴基线;critical 折线 0→1 阶跃清晰)。
+
+### 2026-11-18 v0.5 功能 (运维降噪与可观测出口) 与第十轮评审修复
+
+新增 (ROADMAP v0.5，全部默认向后兼容):
+
+- F27 目标级告警静默：`POST/DELETE /v1/silence/{target}`(单调 deadline 自动过期，重复设置覆盖;静默建立/解除/过期/首次抑制各写 journal Audit);**Resolve 与 Fatal 闩锁告警恒穿透**;monitorctl `silence`/`unsilence`。
+- F28 journal 尾部查询：`GET /v1/journal?tail&target&type&since`(512KB 字节尾读 + spawn_blocking，坏行跳过，truncated 标志，受 F23 鉴权);monitorctl `journal [--json]`。
+- F29 webhook HMAC 签名：`[alert] webhook_secret` + 路由级 `secret`(路由级覆盖全局),投递附 `X-Service-Watch-Signature: sha256=<hex hmac-sha256(body)>`;hmac/sha2 随 notify-webhook feature(纯 Rust);RFC 4231 向量锁定。
+- F30 状态页历史迷你图：零依赖 SVG 折线 (checks_critical/recovery_fatal,/metrics/history 拉取，失败隔离，XSS 纪律延续)。
+
+修复 (第十轮双专家验证):
+
+- [P1] 静默误吞 Fatal 闩锁告警且永不补发 (无 tracker trail/renotify 兜底)→ Fatal 合成告警与 Resolve 同等豁免 + 单测。
+- [P2] RUNBOOK 静默审计查询示例恒空 (Audit 无 target 字段，`--target` 过滤误用)→ 示例修正;DESIGN §4.1 `webhook_secret = ""` 模板与校验矛盾 (照抄启动失败)→ 模板注释化。
+- [P3] journal 端点非 ENOENT 读失败静默伪装成空结果 → 服务端 WARN;monitorctl 表格输出剥离 C0/C1 控制字符 (终端注入防护);status_page.rs 门控补 http-client;迷你图恒定非零序列改画中线 (防"贴顶打满"误读);USAGE.md §13 过时"预留"表述改为已交付。
+
+### 2026-11-18 v0.4 功能 (可信边界与运维闭环) 与第八/九轮评审修复
+
+新增 (ROADMAP v0.4，全部默认向后兼容):
+
+- F23 控制面可选访问令牌：`[control] token` 配置后除 `GET /health` 外全部端点要求 `Authorization: Bearer <token>`(缺失/错误 401);恒定时间比较 (零新依赖);monitorctl `--token` flag + `SERVICE_WATCH_TOKEN` 环境变量 (flag 优先)。
+- F24 journal 体积上限与轮转：`[agent] journal_max_size`(默认 10 MiB,0 = 禁用) 超限轮转 `journal.1.jsonl`(仅保留一代);改名失败降级继续写不停机;重放先上一代后当前，Fatal/预算/未决 SpawnIntent 跨轮转保持。
+- F25 incident 跨重启恢复与重通知：重放恢复仍 open 的 incident(含 warning trail),启动即重通知一次并重置 renotify 窗口;flap 计数器 fresh 不恢复 (取舍见偏差表);孤儿 resolve 幂等丢弃 + `orphan_resolves` 计数;Fatal 合成 incident 随 Reset 闭门。
+- F26 按目标告警路由：`[[alert.routes]]` 顺序首条前缀匹配 (`*` 通配全部),无匹配回落 `webhook_url`;spool 重放按当前配置重新路由。
+
+修复 (第八/九轮评审，双专家验证):
+
+- [P2] reload 删除/重定义不清理 `planned_stop_deadlines`,残留过期强杀截止可对同名新实例误触 force_kill。
+- [P2] metrics pusher 持有 journal_tx 克隆且 POST 在途不响应 shutdown，停机 flush 窗口必然超时丢事件 → JoinHandle 保留，停机 abort+await 收口。
+- [P2] `/metrics` uptime 单调源从未被消费 (copy 块漏拷贝，墙钟永远胜出);F25 × `__recover__` 组合在 reset 后每次重启发虚假 Fatal 重通知 —— 双双修复 + 锁定测试。
+- [P3] `alert.retries` 上界 (≤100)、`watch.pidfile` 空路径拒绝、路由空 pattern 恒不命中、轮转失败计数 + 周期化 WARN、轮转 audit 行丢失文案如实化、`tests/alert_routing.rs` no-default 门控、routes 日志上报 configured/active。
+- 文档 12 处事实核对修正：`[metrics]` 推送已实现 (不再"预留")、`[control].listen` 需重启非热重载、RUNBOOK 适用版本/退出码 1/journal schema 补 spawn_intent|spawn_outcome、端点清单补全、24h 长跑 F17 PASS 状态同步。
+
 ### 2026-11-12 多专家复核与继续实现
 
 - F21 可选深度硬件采集，Linux hwmon 与 macOS AppleSMC 风扇、电压，Windows 显式降级，支持两个 CLI 的快照入口。

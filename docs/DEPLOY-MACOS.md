@@ -166,6 +166,7 @@ sudo rm /Library/LaunchDaemons/com.houseme.service-watch.plist
 | 每 5 秒重启一次 | KeepAlive 在拉异常退出;`agent.err.log` 找 config error，修根因 |
 | 9170 被占 | `lsof -i :9170` 找占用进程释放;或改配置 `[control].listen` 后重启 agent(`bootout`+`bootstrap` —— control 段不走热重载),并同步 `monitorctl --url` |
 | `monitorctl` 报 unreachable | agent 没起或端口不一致：`curl -fsS http://127.0.0.1:9170/health` 定位 |
+| 控制面要走 HTTPS | `[control]` 配 `tls_cert`/`tls_key`(PEM，成对) 后 `bootout`+`bootstrap` 重启 agent,monitorctl 用 `--url https://...`;自签需 CA 入信任链，临时测试可 `--insecure`(RUNBOOK §1.2d) |
 | 合盖/休眠后没有采集 | macOS 休眠会整体暂停 agent，开机恢复;常驻监控请防休眠或用服务器形态 |
 | 温度/风扇读数为空 | 查看 `hardware.degradations` 原因;机型不支持即正常降级 |
 

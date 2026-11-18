@@ -64,6 +64,20 @@ pub enum ControlCommand {
     Reload {
         path: Option<String>,
     },
+    /// F27 目标级静默 (`POST /v1/silence/{target}`):窗口内该 target 的
+    /// Alert/Escalate/Flap 通知不投递 (Resolve 永不静默)。deadline 由 eval 侧
+    /// 单调时钟计算 (与墙钟无关);`duration_secs = 0` 或超上限 (604800 = 7d)
+    /// 由 eval 侧拒绝 (WARN + journal 审计)。重复设置后到覆盖。
+    Silence {
+        target: String,
+        duration_secs: u64,
+        reason: Option<String>,
+    },
+    /// F27 提前解除静默 (`DELETE /v1/silence/{target}`);无活动静默时由 eval
+    /// 侧拒绝并审计。
+    Unsilence {
+        target: String,
+    },
 }
 
 /// target 的形态。

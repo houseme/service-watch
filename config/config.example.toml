@@ -11,7 +11,10 @@ json = false                              # true = structured JSON logs
 [control]                                 # control plane (monitorctl depends on it)
 enabled = true
 listen = "127.0.0.1:9170"                 # loopback only; switching to a non-loopback address is at your own risk
-# token = "change-me"                     # optional Bearer token — F23, reserved: parsed & validated only, enforcement pending; once enforced every endpoint except /health requires Authorization, and monitorctl takes --token or SERVICE_WATCH_TOKEN
+# token = "change-me"                     # optional Bearer token (F23, enforced): every endpoint except /health requires Authorization when set; monitorctl takes --token or SERVICE_WATCH_TOKEN
+# tls_cert = "/etc/service-watch/tls.crt" # optional TLS (F32): both paths required, control plane serves HTTPS on the same listen address; unset = plain HTTP
+# tls_key = "/etc/service-watch/tls.key"
+# client_ca_cert = "/etc/service-watch/tls/client-ca.crt"  # optional mTLS (F38): require client certificates signed by this CA (must be set together with tls_cert/tls_key); monitorctl then passes --client-cert/--client-key
 
 [collect]
 interval = "5s"                           # global collection interval (hardware/process snapshot)
@@ -27,19 +30,33 @@ success_threshold = 2                     # consecutive successes -> recovery (R
 flap_window = "30m"                       # flap detection window
 flap_threshold = 5                        # open/close count within the window that triggers suppression
 deadman_url = ""                          # optional heartbeat POST; failures are logged only
+# webhook_secret = "change-me"            # optional HMAC-SHA256 signing key (F29): deliveries carry X-Service-Watch-Signature: sha256=<hex>; route-level `secret` overrides this per route
 
-# Per-target alert routing — F26, reserved: parsed & validated only, dispatch pending.
-# Sequential first-prefix match on target names; no match falls back to webhook_url above.
+# Per-target alert routing (F26): sequential first-prefix match on target names
+# ("*" as a whole pattern matches every target); no match falls back to webhook_url above.
 # [[alert.routes]]
-# match = "edge-*"
+# match = "edge-"
 # url = "https://hooks.example.com/edge"
 # format = "slack"                        # json | slack
+# secret = "edge-only"                    # optional route-level signing key (F29); falls back to webhook_secret
+
+# Recurring maintenance windows (F31): all times are UTC (no DST support); alerts
+# for matching targets are suppressed during the window, Resolve and Fatal-latch
+# alerts always pass through.
+# [[maintenance]]
+# name = "nightly-deploy"
+# targets = ["*"]                         # target-name prefixes; ["*"] = all
+# start_utc = "18:30"                     # window start, "HH:MM" in UTC
+# duration = "30m"                        # >= 60s
+# days = ["mon", "wed", "fri"]            # optional; default = every day
 
 [metrics]                                 # periodic metrics push (POST JSON MetricsReport; success = 2xx)
 enabled = false
 url = ""                                  # empty = GET /metrics exposure only; single attempt, no retry, a failure is overwritten next round
 interval = "60s"
 timeout = "10s"                           # per-push timeout
+# secret = "change-me"                    # optional HMAC-SHA256 signing key (F34): pushes carry X-Service-Watch-Signature: sha256=<hex>; same verify recipe as webhook signing (RUNBOOK §3.4)
+# history_path = "./data/metrics-history.jsonl"  # optional (F39): persist every published sample as JSONL (single-generation rotation at 10 MiB, like the journal)
 
 # ============ Check targets (monitoring + alerting only) ============
 

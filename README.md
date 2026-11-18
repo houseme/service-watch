@@ -55,7 +55,7 @@ Open the [local status page](http://127.0.0.1:9170/) in a browser. A Fatal targe
 - `SIGHUP` and `POST /v1/reload` apply check, service and watch topology changes; the other config sections require a restart. Redefining a service waits for the old instance to be reaped before starting the new one.
 - JSON metrics at `/metrics`, Prometheus format via `?format=prometheus`, history at `/metrics/history?range=300`. The `[metrics]` periodic push is implemented: with `enabled = true` and a `url` configured, a MetricsReport JSON is POSTed every `interval` (single attempt, failures overwritten next round, consecutive-failure edges write a journal audit).
 - Webhook failure events are written to a spool; replayed records are deleted on confirmed success and expire after 7 days. In-memory events not yet flushed before a force kill still have a loss window.
-- The control plane listens on loopback by default; the HTTP interface relies on the local trust boundary.
+- The control plane listens on loopback by default; the HTTP interface relies on the local trust boundary. An optional `[control] token` enables Bearer authentication on every endpoint except `GET /health` (monitorctl: `--token` flag or `SERVICE_WATCH_TOKEN`).
 
 ## Platforms & optional builds
 

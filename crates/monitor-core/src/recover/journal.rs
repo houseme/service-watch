@@ -22,6 +22,16 @@
 //! 未决意图;eval 冷启动据此对账 (digest 匹配当前定义 → 存在未知实例，
 //! 跳过冷启动防双实例)。`SpawnOutcome` 与 `Reset`/`ResetTargets` 关闭
 //! 对应条目 (reset = 人工承认未知实例已处置，重启后允许拉起)。
+//!
+//! ## 体积上限与单代轮转 (F24)
+//!
+//! 产品写入口 [`run_tracked_writer`] 接受 `max_size`(字节;来自
+//! `agent.journal_max_size`,0 = 完全禁用轮转)。写事件后实测当前文件尺寸，
+//! 超限即轮转：当前 `journal.jsonl` 整体改名 `journal.1.jsonl` (覆盖上一代，
+//! **只保留一代**),立即重建当前文件并写入一条轮转 Audit。改名失败降级为
+//! 保留当前文件继续写 + WARN (不停机、不丢事件;体积上限是运维目标不是
+//! 安全边界)。重放顺序 `journal.1 → journal.jsonl`,Fatal 闩锁/预算窗口/
+//! 未决 SpawnIntent 跨轮转保持。
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -48,6 +58,9 @@ pub struct JournalCounters {
     pub write_failures: AtomicU64,
     pub write_successes: AtomicU64,
     pub critical_failures: AtomicU64,
+    /// F24:轮转失败降级次数 (rename/重建失败，保留当前文件继续写)。
+    /// 仅周期化 WARN + 此计数;/metrics 未暴露 (轮转降级非持久化故障)。
+    pub rotation_failures: AtomicU64,
     failed: AtomicBool,
     failure_notify: tokio::sync::Notify,
 }
@@ -319,6 +332,32 @@ pub struct JournalState {
     /// 崩溃启动事务:target → 未决启动意图 (意图已落盘、结果未到 =
     /// 上次 agent 在 spawn 与结果落盘之间崩溃，存在未知实例)。
     pub pending_spawns: BTreeMap<String, PendingSpawn>,
+    /// F25: incidents still open when replay finishes, keyed by (target, check) —
+    /// alert/escalate opens the gate (updating severity), resolve closes it,
+    /// flap summaries leave the gate untouched. Reset/ResetTargets from the
+    /// recover domain do **not** clear real check-alert entries (a manual reset
+    /// clears Fatal/budget, not check alert state) — the sole exception is the
+    /// Fatal synthetic incident `(target, RECOVER_CHECK)`, which belongs to the
+    /// recovery domain and IS closed by Reset/ResetTargets (round-9 review P2).
+    pub open_incidents: BTreeMap<(String, String), PersistedIncident>,
+    /// F25: resolve events that referenced no open incident during replay
+    /// (historical leftovers / half-line pairing loss). Idempotently discarded;
+    /// counted for diagnostics only.
+    pub orphan_resolves: u64,
+}
+
+/// F25: snapshot of an incident still open after replay (material for the
+/// eval side to restore alert state and re-notify).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedIncident {
+    pub incident_key: u64,
+    pub target: String,
+    pub check: String,
+    pub severity: crate::model::alert::Severity,
+    pub reason: String,
+    /// Wall-clock time of the latest alert/escalate event (seed for the
+    /// re-notify window start).
+    pub last_event_at: SystemTime,
 }
 
 /// 服务定义摘要 (崩溃启动事务对账键):[`ServiceCfg`] 经 serde JSON 序列化
@@ -367,6 +406,18 @@ impl std::hash::Hasher for Fnv64 {
     }
 }
 
+/// F24:上一代 journal 路径。`journal.jsonl` → 同目录 `journal.1.jsonl`
+/// (只保留一代，二次轮转覆盖);无扩展名或多级扩展名同样成立。
+pub(crate) fn gen1_path(path: &Path) -> PathBuf {
+    match path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => match name.rsplit_once('.') {
+            Some((stem, _)) if !stem.is_empty() => path.with_file_name(format!("{stem}.1.jsonl")),
+            _ => path.with_file_name(format!("{name}.1.jsonl")),
+        },
+        None => path.with_file_name("journal.1.jsonl"),
+    }
+}
+
 /// 打开 journal 并确认可持久化，应在任何恢复任务启动前调用。
 pub fn open_writer(path: &Path) -> Result<std::fs::File> {
     if let Some(parent) = path.parent()
@@ -393,11 +444,14 @@ pub fn open_writer(path: &Path) -> Result<std::fs::File> {
 }
 
 /// 兼容裸事件通道的写入口。所有文件 I/O 在阻塞任务中执行。
+/// 兼容入口固定不轮转 (max_size = 0):嵌入者自持通道与文件生命周期，保持
+/// 既有行为不变;产品路径经 [`run_tracked_writer`] 由 runtime 传入
+/// `cfg.agent.journal_max_size` (F24)。
 pub async fn run_writer(path: PathBuf, mut rx: mpsc::Receiver<JournalEvent>) -> Result<()> {
     let counters = Arc::new(JournalCounters::default());
     tokio::task::spawn_blocking(move || {
         let file = open_writer(&path)?;
-        write_events(file, path, counters, || {
+        write_events(file, path, counters, 0, || {
             rx.blocking_recv()
                 .map(|event| JournalRequest { event, ack: None })
         })
@@ -407,15 +461,18 @@ pub async fn run_writer(path: PathBuf, mut rx: mpsc::Receiver<JournalEvent>) -> 
 }
 
 /// 产品写入口。文件已由 runtime 在任务启动前打开并确认可写。
-pub async fn run_tracked_writer(
+/// `max_size`:journal 轮转阈值 (字节;0 = 完全禁用轮转，F24)。阈值从
+/// `agent.journal_max_size` 经 runtime 启动处传入;确认式持久化语义不变。
+pub async fn run_tracked_writer_with_limit(
     file: std::fs::File,
     path: PathBuf,
     mut rx: mpsc::Receiver<JournalRequest>,
     counters: Arc<JournalCounters>,
+    max_size: u64,
 ) -> Result<()> {
     let failures = counters.clone();
     let result = tokio::task::spawn_blocking(move || {
-        write_events(file, path, counters, || rx.blocking_recv())
+        write_events(file, path, counters, max_size, || rx.blocking_recv())
     })
     .await
     .map_err(|e| {
@@ -428,10 +485,22 @@ pub async fn run_tracked_writer(
     result
 }
 
+/// 4 参兼容入口 (固定 `max_size = 0`,无轮转):既有嵌入调用者 (eval 测试)
+/// 不经改动继续编译。产品运行时应使用 [`run_tracked_writer_with_limit`]。
+pub async fn run_tracked_writer(
+    file: std::fs::File,
+    path: PathBuf,
+    rx: mpsc::Receiver<JournalRequest>,
+    counters: Arc<JournalCounters>,
+) -> Result<()> {
+    run_tracked_writer_with_limit(file, path, rx, counters, 0).await
+}
+
 fn write_events(
     mut file: std::fs::File,
     path: PathBuf,
     counters: Arc<JournalCounters>,
+    max_size: u64,
     mut receive: impl FnMut() -> Option<JournalRequest>,
 ) -> Result<()> {
     while let Some(request) = receive() {
@@ -458,6 +527,37 @@ fn write_events(
             return Err(e);
         }
         counters.write_successes.fetch_add(1, Ordering::Relaxed);
+        // F24:写**后**实测当前文件尺寸决定是否轮转 (选写后而非写前预判的
+        // 理由:metadata 读到的是内核眼中的真实大小，外部 copytruncate 轮转
+        // 工具 (RUNBOOK §6.3) 把文件清零后，累计字节数式预判会立即误轮转，
+        // 实测天然兼容;journal 事件频率低，一次 metadata 系统调用成本可忽略)。
+        // 阈值是软性运维目标：单行超出阈值的一行溢出 (~几百字节) 可接受。
+        if max_size > 0
+            && let Ok(meta) = file.metadata()
+            && meta.len() > max_size
+        {
+            match rotate_file(file, &path, meta.len(), SystemTime::now()) {
+                Ok(new_file) => file = new_file,
+                Err(e) => {
+                    // 降级 (F24):改名/重建失败保留当前文件继续写 —— 不停机、
+                    // 不丢事件，超限文件继续增长直至运维介入 (体积上限是运维
+                    // 目标不是安全边界)。句柄已在 rotate_file 中释放，必须重开
+                    // 当前文件;重开失败属真实持久化故障，走既有停机路径。
+                    // P3(第九轮验证):计数 + 周期化 WARN (对齐 dropped 模式),
+                    // 持续失败时不再逐事件刷屏。
+                    let n = counters.rotation_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n == 1 || n.is_multiple_of(64) {
+                        tracing::warn!(
+                            path = %path.display(),
+                            failures = n,
+                            error = %e,
+                            "journal rotation failed; keeping current file (size cap is an ops target, not a safety boundary)"
+                        );
+                    }
+                    file = open_writer(&path)?;
+                }
+            }
+        }
     }
     if let Err(e) = file.sync_data() {
         counters.write_failures.fetch_add(1, Ordering::Relaxed);
@@ -465,6 +565,71 @@ fn write_events(
         return Err(e.into());
     }
     Ok(())
+}
+
+/// F24:单代轮转。步骤：释放当前句柄 → 删除旧 `journal.1.jsonl`(若存在) →
+/// 当前文件原子改名 `journal.1.jsonl` → 立即重建当前文件 → 向**新文件**写
+/// 一条 Audit(含轮转前后字节数，边界一次性 sync_data 落盘;轮转低频，sync
+/// 成本可忽略)。
+///
+/// Windows 语义：打开中的文件不能 rename，必须先释放句柄再改名 (先 drop 后
+/// rename)。`std::fs::File` 无用户态缓冲，数据已直接进入内核，无需显式 flush。
+/// rename 同目录原子完成，不产生交错行;任何一步失败由调用方降级处理。
+///
+/// P3(第九轮验证):改名成功后的 Audit 行写入失败**不算轮转失败** —— 轮转
+/// 实际已发生，降级为 WARN "audit line lost" 并返回 Ok(new_file);Audit 仅
+/// 存档，其丢失不影响任何恢复语义 (调用方无需再重开文件)。
+///
+/// 注：阈值应显著大于单行长度 (一行 ~数百字节)。阈值小于轮转 audit 一行时
+/// 会退化为逐事件轮转 (每写一条就轮转一次，行为仍正确 —— 一代保留语义不变，
+/// 但历史事件只存活一代),配置层/运维应避免。慢盘环境下轮转与下一关键事件
+/// 共享单写线程的 2s 确认预算 (本地 fs 轮转为毫秒级，理论边缘;见 RUNBOOK)。
+fn rotate_file(
+    file: std::fs::File,
+    path: &Path,
+    rotated_bytes: u64,
+    at: SystemTime,
+) -> Result<std::fs::File> {
+    let gen1 = gen1_path(path);
+    drop(file);
+    if gen1.exists() {
+        std::fs::remove_file(&gen1)?;
+    }
+    std::fs::rename(path, &gen1)?;
+    let mut new_file = open_writer(path)?;
+    let audit = JournalEvent::Audit {
+        at,
+        message: format!(
+            "journal rotated: {rotated_bytes} bytes -> {} (one generation kept); current file restarted (0 bytes)",
+            gen1.display()
+        ),
+    };
+    let audit_result = serde_json::to_vec(&audit).map(|mut line| {
+        line.push(b'\n');
+        line
+    });
+    match audit_result {
+        Ok(line) => {
+            if let Err(e) = new_file
+                .write_all(&line)
+                .and_then(|()| new_file.sync_data())
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "journal rotation completed but audit line lost (archive-only; recovery semantics unaffected)"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "journal rotation completed but audit line lost (archive-only; recovery semantics unaffected)"
+            );
+        }
+    }
+    Ok(new_file)
 }
 
 /// 同步重放 journal(启动路径调用一次)。
@@ -479,14 +644,28 @@ pub fn replay(path: &Path) -> JournalState {
 }
 
 /// 运行时重放入口。无法读取既有日志时拒绝启动，避免空状态绕过 Fatal 闩锁。
+///
+/// F24:`journal.1.jsonl` 存在时先重放上一代，再重放当前文件，顺序 apply 到
+/// 同一 [`JournalState`] —— Fatal 闩锁/预算窗口/未决 SpawnIntent 跨轮转保持
+/// (行顺序语义与单文件一致;rename 同目录原子，不产生跨文件交错行)。
+/// `journal_max_size = 0` 时 journal.1 永不产生，NotFound 分支天然兼容;
+/// 单文件不存在路径行为不变。
 pub fn replay_checked(path: &Path) -> Result<JournalState> {
     let mut state = JournalState::default();
+    replay_file(&gen1_path(path), &mut state)?;
+    replay_file(path, &mut state)?;
+    Ok(state)
+}
+
+/// 单文件重放 (字节级读取 + 坏行跳过;NotFound 视为空文件)。
+/// F24 从 replay_checked 拆出以支持上一代文件;语义不变。
+fn replay_file(path: &Path, state: &mut JournalState) -> Result<()> {
     // H-P2:字节级读取 —— 断电撕裂点落在多字节 UTF-8 字符内部时，
     // read_to_string 会整体失败 (InvalidData) 并升级为 agent 拒绝启动;
     // 逐字节切行 + 尾行 lossy 净化，与 open_writer 半行定界哲学一致。
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(state),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
     let content = String::from_utf8_lossy(&bytes);
@@ -496,13 +675,13 @@ pub fn replay_checked(path: &Path) -> Result<JournalState> {
             continue;
         }
         match serde_json::from_str::<JournalEvent>(line) {
-            Ok(event) => apply(&event, &mut state),
+            Ok(event) => apply(&event, state),
             Err(e) => {
                 tracing::warn!(line = no + 1, error = %e, "journal: 坏行跳过");
             }
         }
     }
-    Ok(state)
+    Ok(())
 }
 
 /// 按行顺序应用单条事件 (Reset 之后同 target 的新 Fatal 仍要置位)。
@@ -524,6 +703,14 @@ fn apply(event: &JournalEvent, state: &mut JournalState) {
             // 崩溃启动事务:reset = 人工承认未知实例已处置，清除未决意图，
             // 重启后允许拉起 (对账不再跳过冷启动)。
             state.pending_spawns.remove(target);
+            // P2(第九轮验证):Fatal 的合成 incident (check = RECOVER_CHECK) 属
+            // 恢复域 —— reset 解除闩锁即同时闭门，否则此后每次重启都会对已
+            // reset 的 target 重放虚假 "latched fatal" 重通知。(eval 侧
+            // restore_incidents 另有 fatal 集合防御层。)
+            state.open_incidents.remove(&(
+                target.clone(),
+                crate::model::alert::RECOVER_CHECK.to_string(),
+            ));
             state.last_reset.insert(target.clone(), *at);
         }
         JournalEvent::ResetTargets { at, targets, .. } => {
@@ -531,6 +718,10 @@ fn apply(event: &JournalEvent, state: &mut JournalState) {
                 state.fatal.remove(target);
                 state.restarts.remove(target);
                 state.pending_spawns.remove(target);
+                state.open_incidents.remove(&(
+                    target.clone(),
+                    crate::model::alert::RECOVER_CHECK.to_string(),
+                ));
                 state.last_reset.insert(target.clone(), *at);
             }
         }
@@ -585,8 +776,50 @@ fn apply(event: &JournalEvent, state: &mut JournalState) {
                 );
             }
         }
-        // incident/audit 仅存档，不参与恢复状态重建
-        JournalEvent::Incident { .. } | JournalEvent::Audit { .. } => {}
+        JournalEvent::Incident {
+            at,
+            incident,
+            target,
+            check,
+            category,
+            severity,
+            reason,
+        } => {
+            // F25: open-set maintenance. alert/escalate opens the gate
+            // (recording the latest severity and reason); resolve closes it; a
+            // flap-suppression summary leaves the gate as-is (at summary time
+            // the incident may be open or closed and replay has no third-state
+            // evidence, so the current state is kept conservatively — the
+            // difference from the old F7 "trail does not survive restart"
+            // semantics is exactly this table).
+            use crate::model::alert::Category;
+            let key = (target.clone(), check.clone());
+            match category {
+                Category::Resolve => {
+                    // F25:配对完整性 —— resolve 引用不存在的 open incident
+                    // (历史遗留/半行丢失配对) 时幂等丢弃并计数，供诊断。
+                    if state.open_incidents.remove(&key).is_none() {
+                        state.orphan_resolves += 1;
+                    }
+                }
+                Category::Alert | Category::Escalate => {
+                    state.open_incidents.insert(
+                        key,
+                        PersistedIncident {
+                            incident_key: *incident,
+                            target: target.clone(),
+                            check: check.clone(),
+                            severity: *severity,
+                            reason: reason.clone(),
+                            last_event_at: *at,
+                        },
+                    );
+                }
+                Category::Flap => {}
+            }
+        }
+        // audit is archived only; it takes no part in recovery state rebuild
+        JournalEvent::Audit { .. } => {}
     }
 }
 
@@ -942,7 +1175,7 @@ mod tests {
             },
             ack: Some(ack),
         });
-        assert!(write_events(file, path, counters.clone(), || request.take()).is_err());
+        assert!(write_events(file, path, counters.clone(), 0, || request.take()).is_err());
         assert!(receipt.try_recv().unwrap().is_err());
         assert!(counters.has_failed());
         assert_eq!(counters.snapshot().write_failures, 1);
@@ -1029,6 +1262,162 @@ mod tests {
         assert!(state.fatal.contains("db-1"));
         assert!(!state.fatal.contains("web-1"));
         assert!(state.last_reset.is_empty());
+        assert_eq!(
+            state.open_incidents.len(),
+            1,
+            "alert opens and no resolve follows -> still open after replay (F25)"
+        );
+        let inc = state
+            .open_incidents
+            .get(&("web-1".into(), "http".into()))
+            .unwrap();
+        assert_eq!(inc.incident_key, 42);
+        assert_eq!(inc.severity, Severity::Warning);
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn replay_collects_still_open_incidents_f25() {
+        let dir = tmp_dir("open-incidents");
+        cleanup(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let (tx, rx) = mpsc::channel(16);
+        let writer = tokio::spawn(run_writer(path.clone(), rx));
+        let t = base();
+        let inc_event = |category: Category,
+                         severity: Severity,
+                         at: SystemTime,
+                         incident: u64,
+                         check: &str,
+                         reason: &str| {
+            tx.try_send(JournalEvent::Incident {
+                at,
+                incident,
+                target: "api".into(),
+                check: check.into(),
+                category,
+                severity,
+                reason: reason.into(),
+            })
+            .unwrap();
+        };
+        inc_event(Category::Alert, Severity::Warning, t, 1, "http", "down");
+        inc_event(
+            Category::Escalate,
+            Severity::Critical,
+            t + Duration::from_secs(30),
+            1,
+            "http",
+            "still down",
+        );
+        inc_event(
+            Category::Alert,
+            Severity::Warning,
+            t + Duration::from_secs(40),
+            2,
+            "tcp",
+            "refused",
+        );
+        inc_event(
+            Category::Flap,
+            Severity::Warning,
+            t + Duration::from_secs(45),
+            2,
+            "tcp",
+            "flapping",
+        );
+        inc_event(
+            Category::Resolve,
+            Severity::Warning,
+            t + Duration::from_secs(50),
+            2,
+            "tcp",
+            "back",
+        );
+        // 孤儿 resolve:引用从未 open 过的 (target, check) → 幂等丢弃 + 计数
+        inc_event(
+            Category::Resolve,
+            Severity::Warning,
+            t + Duration::from_secs(55),
+            3,
+            "grpc",
+            "never opened",
+        );
+        tx.try_send(JournalEvent::Reset {
+            at: t + Duration::from_secs(60),
+            target: "api".into(),
+            source: "control".into(),
+        })
+        .unwrap();
+        drop(tx); // 关闭 → writer 返回 Ok
+        writer.await.unwrap().unwrap();
+
+        let state = replay(&path);
+        assert_eq!(
+            state.open_incidents.len(),
+            1,
+            "resolve closed it; recover-domain Reset does not clear the alert domain"
+        );
+        let inc = state
+            .open_incidents
+            .get(&("api".into(), "http".into()))
+            .unwrap();
+        assert_eq!(inc.incident_key, 1);
+        assert_eq!(
+            inc.severity,
+            Severity::Critical,
+            "escalate updates severity"
+        );
+        assert_eq!(inc.reason, "still down");
+        assert_eq!(inc.last_event_at, t + Duration::from_secs(30));
+        assert_eq!(state.orphan_resolves, 1, "无配对 resolve 丢弃并计数 (F25)");
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn reset_closes_recover_domain_synthetic_incident_gate() {
+        // P2(第九轮验证):Fatal 的合成 incident (target, "__recover__") 属恢复
+        // 域 —— Reset/ResetTargets 必须闭门，否则 reset 后每次重启都重放虚假
+        // "latched fatal" 重通知。真实 check 的 incident 不受 Reset 影响。
+        let dir = tmp_dir("recover-gate");
+        cleanup(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let (tx, rx) = mpsc::channel(16);
+        let writer = tokio::spawn(run_writer(path.clone(), rx));
+        let t = base();
+        tx.try_send(JournalEvent::Fatal {
+            at: t,
+            target: "app".into(),
+            reason: "budget".into(),
+        })
+        .unwrap();
+        tx.try_send(JournalEvent::Incident {
+            at: t,
+            incident: 7,
+            target: "app".into(),
+            check: crate::model::alert::RECOVER_CHECK.into(),
+            category: Category::Alert,
+            severity: Severity::Critical,
+            reason: "target app latched fatal".into(),
+        })
+        .unwrap();
+        tx.try_send(JournalEvent::Reset {
+            at: t + Duration::from_secs(10),
+            target: "app".into(),
+            source: "control".into(),
+        })
+        .unwrap();
+        drop(tx);
+        writer.await.unwrap().unwrap();
+
+        let state = replay(&path);
+        assert!(!state.fatal.contains("app"), "reset 解除 Fatal");
+        assert!(
+            state.open_incidents.is_empty(),
+            "恢复域合成 incident 随 reset 闭门，不再产生虚假重通知"
+        );
         cleanup(&dir);
     }
 
@@ -1206,6 +1595,305 @@ mod tests {
         writer2.await.unwrap().unwrap();
         let state2 = replay(&path2);
         assert!(!state2.fatal.contains("app"), "Reset 应清除 Fatal 闩锁");
+        cleanup(&dir);
+    }
+
+    // ---- F24:journal 体积上限与单代轮转 ----
+
+    /// F24 测试助手：打开文件并起带轮转阈值的 tracked writer (产品路径)。
+    fn spawn_writer_with_limit(
+        path: &Path,
+        max_size: u64,
+    ) -> (
+        JournalSender,
+        tokio::task::JoinHandle<Result<()>>,
+        Arc<JournalCounters>,
+    ) {
+        let file = open_writer(path).unwrap();
+        let (sender, rx) = channel(16);
+        let counters = sender.counters().clone();
+        let writer = tokio::spawn(run_tracked_writer_with_limit(
+            file,
+            path.to_path_buf(),
+            rx,
+            counters.clone(),
+            max_size,
+        ));
+        (sender, writer, counters)
+    }
+
+    /// 定长填充审计消息 (每行 ~150 字节，便于用 200 字节小阈值稳定触发轮转)。
+    fn filler(i: u64) -> String {
+        format!("filler-{i:060}")
+    }
+
+    fn audit(msg: String) -> JournalEvent {
+        JournalEvent::Audit {
+            at: base(),
+            message: msg,
+        }
+    }
+
+    /// 超限触发轮转:journal.1 生成且当前文件续写，轮转 audit 落盘新文件
+    /// (含轮转前后字节数;前 = 上一代实际大小)。阈值 500 字节 —— 须显著
+    /// 大于轮转 audit 一行 (~250 字节，含绝对路径),否则 audit 本身会立即
+    /// 再次触发轮转 (行为正确但断言的是退化形态，见 rotate_file doc)。
+    #[tokio::test]
+    async fn size_limit_triggers_rotation_and_current_file_continues() {
+        let dir = tmp_dir("rotate-basic");
+        cleanup(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let (sender, writer, _counters) = spawn_writer_with_limit(&path, 500);
+        for i in 0..5 {
+            sender.send(audit(filler(i))).await.unwrap();
+        }
+        drop(sender);
+        writer.await.unwrap().unwrap();
+
+        let gen1 = gen1_path(&path);
+        assert!(gen1.is_file(), "超限必须产生上一代 journal.1.jsonl");
+        let old = std::fs::read_to_string(&gen1).unwrap();
+        assert!(
+            old.contains(&filler(0)) && old.contains(&filler(3)),
+            "前四条事件留在上一代"
+        );
+        assert!(!old.contains(&filler(4)), "轮转后的事件写当前文件");
+
+        // audit 落盘**新文件**首行，含轮转前后字节数
+        let cur = std::fs::read_to_string(&path).unwrap();
+        let cur_lines: Vec<&str> = cur.lines().collect();
+        assert_eq!(cur_lines.len(), 2, "当前文件 = 轮转 audit + 1 条续写事件");
+        let first: JournalEvent = serde_json::from_str(cur_lines[0]).unwrap();
+        match first {
+            JournalEvent::Audit { message, .. } => {
+                assert!(
+                    message.starts_with("journal rotated: "),
+                    "轮转必须向新文件写 audit: {message}"
+                );
+                assert!(
+                    message.contains(&format!(
+                        "{} bytes",
+                        std::fs::metadata(&gen1).unwrap().len()
+                    )),
+                    "audit 含轮转前字节数 (上一代实际大小): {message}"
+                );
+                assert!(
+                    message.contains("(0 bytes)"),
+                    "audit 含轮转后字节数：{message}"
+                );
+            }
+            _ => panic!("新文件首行必须是轮转 audit"),
+        }
+        assert!(cur.contains(&filler(4)), "当前文件续写轮转后的事件");
+        cleanup(&dir);
+    }
+
+    /// 二次轮转覆盖旧 journal.1 (只保留一代;首代事件随覆盖丢弃，属预期取舍)。
+    #[tokio::test]
+    async fn second_rotation_overwrites_previous_generation() {
+        let dir = tmp_dir("rotate-twice");
+        cleanup(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let (sender, writer, _counters) = spawn_writer_with_limit(&path, 500);
+        for i in 0..10 {
+            sender.send(audit(filler(i))).await.unwrap();
+        }
+        drop(sender);
+        writer.await.unwrap().unwrap();
+
+        let gen1 = gen1_path(&path);
+        assert!(gen1.is_file());
+        let old = std::fs::read_to_string(&gen1).unwrap();
+        assert!(
+            !old.contains(&filler(0)),
+            "二次轮转必须覆盖旧 journal.1 (首代事件被丢弃)"
+        );
+        assert!(old.contains(&filler(9)), "上一代 = 最近一次轮转的内容");
+        let cur = std::fs::read_to_string(&path).unwrap();
+        assert!(!cur.contains(&filler(0)));
+        assert_eq!(cur.lines().count(), 1, "当前文件只剩最新一轮转 audit");
+        assert!(replay_checked(&path).is_ok(), "多代重放不报错");
+        cleanup(&dir);
+    }
+
+    /// `journal_max_size = 0` 完全禁用轮转:journal.1 永不产生。
+    #[tokio::test]
+    async fn max_size_zero_disables_rotation() {
+        let dir = tmp_dir("rotate-disabled");
+        cleanup(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let (sender, writer, _counters) = spawn_writer_with_limit(&path, 0);
+        for i in 0..6 {
+            sender.send(audit(filler(i))).await.unwrap();
+        }
+        drop(sender);
+        writer.await.unwrap().unwrap();
+
+        assert!(!gen1_path(&path).exists(), "max_size = 0 必须完全不轮转");
+        let cur = std::fs::read_to_string(&path).unwrap();
+        for i in 0..6 {
+            assert!(cur.contains(&filler(i)), "全部事件留在单文件");
+        }
+        assert_eq!(cur.lines().count(), 6);
+        cleanup(&dir);
+    }
+
+    /// Fatal 写入 → 轮转 → 重启重放仍 Fatal (跨轮转闩锁契约)。
+    #[tokio::test]
+    async fn fatal_before_rotation_survives_replay() {
+        let dir = tmp_dir("rotate-fatal");
+        cleanup(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let (sender, writer, _counters) = spawn_writer_with_limit(&path, 500);
+        sender
+            .send(JournalEvent::Fatal {
+                at: base(),
+                target: "app".into(),
+                reason: "budget".into(),
+            })
+            .await
+            .unwrap();
+        for i in 0..4 {
+            sender.send(audit(filler(i))).await.unwrap();
+        }
+        drop(sender);
+        writer.await.unwrap().unwrap();
+
+        let gen1 = gen1_path(&path);
+        assert!(gen1.is_file(), "Fatal 之后超限仍应轮转");
+        assert!(
+            std::fs::read_to_string(&gen1)
+                .unwrap()
+                .contains("\"fatal\""),
+            "Fatal 记录在上一代文件"
+        );
+        let state = replay_checked(&path).unwrap();
+        assert!(state.fatal.contains("app"), "Fatal 跨轮转重放保持");
+        cleanup(&dir);
+    }
+
+    /// 上一代 journal.1 中的未决 SpawnIntent 重放后仍阻塞同名冷启动
+    /// (pending_spawns 非空;崩溃启动事务语义跨轮转保持)。
+    #[tokio::test]
+    async fn pending_spawn_in_rotated_generation_blocks_cold_start_semantics() {
+        let dir = tmp_dir("rotate-spawn-intent");
+        cleanup(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let (sender, writer, _counters) = spawn_writer_with_limit(&path, 500);
+        sender
+            .send(JournalEvent::SpawnIntent {
+                at: base(),
+                target: "app".into(),
+                config_digest: "digest-1".into(),
+            })
+            .await
+            .unwrap();
+        for i in 0..4 {
+            sender.send(audit(filler(i))).await.unwrap();
+        }
+        drop(sender);
+        writer.await.unwrap().unwrap();
+
+        let state = replay_checked(&path).unwrap();
+        assert_eq!(
+            state.pending_spawns.len(),
+            1,
+            "journal.1 内的未决 SpawnIntent 重放后必须保留"
+        );
+        assert_eq!(state.pending_spawns["app"].config_digest, "digest-1");
+        cleanup(&dir);
+    }
+
+    /// 轮转后坏行/半行隔离行为不回归：当前文件的崩溃半行由 open_writer
+    /// 划界，重放跳过坏行，后续已确认记录可重放 (且上一代 Fatal 保持)。
+    #[tokio::test]
+    async fn bad_line_after_rotation_is_isolated_and_replay_continues() {
+        let dir = tmp_dir("rotate-badline");
+        cleanup(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let (sender, writer, _counters) = spawn_writer_with_limit(&path, 500);
+        sender
+            .send(JournalEvent::Fatal {
+                at: base(),
+                target: "app".into(),
+                reason: "budget".into(),
+            })
+            .await
+            .unwrap();
+        for i in 0..4 {
+            sender.send(audit(filler(i))).await.unwrap();
+        }
+        drop(sender);
+        writer.await.unwrap().unwrap();
+
+        // 模拟崩溃半行：当前文件尾部追加无换行半行
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"type\":\"audi");
+        std::fs::write(&path, &bytes).unwrap();
+
+        // 重启 writer:open_writer 划定边界，后续 Fatal 正常落盘
+        let (sender, writer, _counters) = spawn_writer_with_limit(&path, 0);
+        sender
+            .send(JournalEvent::Fatal {
+                at: base(),
+                target: "app2".into(),
+                reason: "budget".into(),
+            })
+            .await
+            .unwrap();
+        drop(sender);
+        writer.await.unwrap().unwrap();
+
+        let state = replay_checked(&path).unwrap();
+        assert!(state.fatal.contains("app"), "上一代 Fatal 保持");
+        assert!(
+            state.fatal.contains("app2"),
+            "半行定界后新 Fatal 可重放 (坏行隔离不回归)"
+        );
+        cleanup(&dir);
+    }
+
+    /// 改名失败降级：保留当前文件继续写，不停机、不丢事件、不误报持久化
+    /// 故障 (体积上限是运维目标不是安全边界)。构造方式:journal.1 路径
+    /// 预置为目录，remove_file 必然失败 → 轮转失败走降级分支。
+    #[tokio::test]
+    async fn rotation_failure_degrades_to_keep_writing() {
+        let dir = tmp_dir("rotate-degrade");
+        cleanup(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let gen1 = gen1_path(&path);
+        std::fs::create_dir_all(&gen1).unwrap(); // 使轮转的删除/改名必然失败
+        let (sender, writer, counters) = spawn_writer_with_limit(&path, 500);
+        sender
+            .send(JournalEvent::Fatal {
+                at: base(),
+                target: "app".into(),
+                reason: "budget".into(),
+            })
+            .await
+            .unwrap();
+        for i in 0..4 {
+            sender.send(audit(filler(i))).await.unwrap();
+        }
+        drop(sender);
+        writer.await.unwrap().unwrap();
+
+        let stats = counters.snapshot();
+        assert_eq!(stats.write_successes, 5, "降级路径不停机:全部事件照常落盘");
+        assert_eq!(stats.write_failures, 0, "轮转失败不算写失败");
+        assert!(!counters.has_failed(), "降级不得触发持久化故障闩锁");
+        let cur = std::fs::read_to_string(&path).unwrap();
+        for i in 0..4 {
+            assert!(cur.contains(&filler(i)), "当前文件保留并继续增长");
+        }
+        assert!(gen1.is_dir(), "降级路径不得破坏现场");
         cleanup(&dir);
     }
 }

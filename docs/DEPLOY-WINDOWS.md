@@ -104,6 +104,8 @@ C:\service-watch\install-service.ps1
 
 脚本自动完成：注册 SCM 服务 (名 `service-watch`)、崩溃后 5 秒自动重启、启动服务并等待就绪 (最多 30 秒)。默认以 LocalSystem 运行;专用账户、自定义路径用参数覆盖 (如 `-InstallDir D:\service-watch ...`),全部参数见 `docs\deploy\windows\README.md`。
 
+> CI 演练 (F36)：安装/启动/`sc stop` 优雅停机/**Job Object 孤儿存活**/重装幂等/**热重载**/**错误退出自动恢复**/卸载清理链路，在每次 push/PR 由 `.github/workflows/windows-scm.yml` 于 windows-latest runner 用**同一份 install-service.ps1** 自动演练；人工部署异常时可对照该作业的断言步骤定位。
+
 ## 第 7 步：验证
 
 逐条执行，全部正常即部署完成：
@@ -168,8 +170,9 @@ Remove-Item -Recurse -Force C:\service-watch    # 含 journal 与日志,确认�
 | `--check-config` 报错退出 | 按报错修 config.toml;路径写正斜杠 `C:/...` 或双反斜杠 `C:\\...` |
 | 服务启动后立即停止 (退出码 1) | agent.log 见 config error → 修配置;见 "windows-service feature" → 按第 2 步重编 agent |
 | 服务反复重启 (约 5 秒一次) | 崩溃自动恢复生效中;查 agent.log 修根因 |
-| 9170 端口被占 | `netstat -ano | findstr :9170` 找占用进程释放;或改配置 `[control].listen` 后重启服务(`Restart-Service` —— control 段不走热重载),并同步 `monitorctl --url` |
+| 9170 端口被占 | `netstat -ano | findstr :9170` 找占用进程释放;或改配置 `[control].listen` 后重启服务 (`Restart-Service` —— control 段不走热重载),并同步 `monitorctl --url` |
 | `monitorctl` 报 unreachable | 服务没起或端口不一致：`Invoke-RestMethod http://127.0.0.1:9170/health` 定位 |
+| 控制面要走 HTTPS | `[control]` 配 `tls_cert`/`tls_key`(PEM，成对) 后 `Restart-Service`,monitorctl 用 `--url https://...`;自签需 CA 入信任链，临时测试可 `--insecure`(RUNBOOK §1.2d) |
 | NASM/CMake 构建报错 | 构建依赖缺失，回第 1 步确认 PATH 后重编 |
 
 更完整的排障与语义说明：`docs/deploy/windows/README.md`、`docs/RUNBOOK.md`。

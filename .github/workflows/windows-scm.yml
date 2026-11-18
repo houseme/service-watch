@@ -1,0 +1,417 @@
+# F36:Windows runner SCM 实机演练(ROADMAP v0.7.x)。
+#
+# 复用 docs/deploy/windows/install-service.ps1(人工部署同一脚本,零改动,
+# 参数化安装)在 windows-latest 上真实走一遍 SCM 生命周期,断言链:
+#   安装(真实脚本) → sc query RUNNING → GET /health 200 → 服务模式文件日志
+#   与 journal.jsonl 落盘 → sc stop → 轮询 STOPPED(优雅停机,上限 60s)→
+#   /health 不再应答(进程确已退出)→ agent.log 停机标记(in-process shutdown
+#   requested / shutdown complete / reason=Clean)→ Job Object 孤儿断言(监督
+#   子进程在 agent 退出后存活)→ 服务已存在时重装 fail-fast(脚本的幂等守卫)
+#   → sc delete → 按"先 delete 再 install"文档化路径重装成功(含 9170 端口
+#   重绑)→ POST /v1/reload 热重载断言(/status 反映新 check)→ taskkill 强杀
+#   → SCM failure action 自动拉起 → /health 恢复 → 卸载清理(失败路径也执行)。
+#
+# 与 ci.yml 分工:ci.yml 的 windows 作业只证编译与单测,cross-check 只交叉
+# cargo check;本作业证明真实 SCM 安装/启停。交互式 Job Object/console 演练与
+# 真实目标服务场景仍属人工验收(docs/deploy/windows/README.md §5.1)。
+#
+# journal 断言口径(与实现语义对齐,如实记录):监督目标的 spawn 事务
+# (SpawnIntent/SpawnOutcome)是确定性落盘的 journal 行;优雅停机不写专门
+# journal 行(drain 窗口超时才写 audit),停机证据 = agent.log 停机标记 +
+# SCM STOPPED。故本作业断言 journal 含 spawn_intent/spawn_outcome 而非
+# shutdown/audit 行。
+name: windows-scm
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# P3(第十二轮验证):最小权限显式化 —— 本作业不需要任何 token。
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-scm-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  scm-drill:
+    # 独立文件/独立作业:不改变 ci.yml 门禁语义(要并入门禁时把本作业
+    # 加进分支保护即可)。30 分钟:rust-cache 命中时构建 ~4-6min + 断言链 ~5min
+    # (含孤儿/热重载/崩溃自愈三步),余量给 runner 池。
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      # 演练专用服务名(与人工部署默认 service-watch 区分,清理不误伤)
+      SW_SERVICE: service-watch-ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # reqwest 0.13 的 rustls 绑定 aws-lc-rs:Windows 构建需 NASM + CMake
+      # (与 ci.yml test 作业同口径)。
+      - run: choco install -y nasm cmake
+        shell: pwsh
+      - run: echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV
+        shell: pwsh
+      # P2(第十二轮验证):无缓存 release 构建 20min 偏紧 —— rust-cache 兜底。
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/monitor-agent -> target
+          cache-all-crates: true
+
+      - name: build monitor-agent (默认 feature + windows-service,控制平面随默认 feature 启用)
+        shell: pwsh
+        run: cargo build --release -p monitor-agent --features windows-service
+
+      - name: stage binary + write minimal config.toml
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installDir = Join-Path $env:RUNNER_TEMP 'service-watch-ci'
+          $dataDir    = Join-Path $installDir 'data'
+          New-Item -ItemType Directory -Force -Path $installDir, $dataDir | Out-Null
+          Copy-Item 'target\release\monitor-agent.exe' `
+            (Join-Path $installDir 'monitor-agent.exe') -Force
+          # TOML 写正斜杠免转义(deploy 文档约定);data_dir 必须与安装传入的
+          # -DataDir 指向同一目录(仅斜杠方向不同,Windows 路径等价)。
+          $dataDirT = ($dataDir -replace '\\', '/')
+          $cfgLines = @(
+            '[agent]'
+            "data_dir = `"$dataDirT`""
+            ''
+            '[control]'
+            'enabled = true'
+            'listen = "127.0.0.1:9170"'
+            ''
+            '[collect]'
+            'interval = "5s"'
+            ''
+            '[log]'
+            'json = false'
+            ''
+            '# 自监控 check:目标 = 本 agent 控制平面(127.0.0.1:9170)'
+            '[[check]]'
+            'name = "ci-self-control"'
+            'kind = "tcp"'
+            'addr = "127.0.0.1:9170"'
+            'interval = "10s"'
+            'timeout = "5s"'
+            ''
+            '# 空闲监督目标:ping -t 常驻 —— 让 journal 确定落盘 spawn 事务行'
+            '# (SpawnIntent/SpawnOutcome)供 journal 断言;agent 停机时该目标'
+            '# 停机不杀子进程:按 Job Object 语义保留为孤儿,随 runner VM 销毁。'
+            '[[service]]'
+            'name = "ci-idle-target"'
+            'command = "C:/Windows/System32/ping.exe"'
+            'args = ["-t", "127.0.0.1"]'
+          )
+          $cfgPath = Join-Path $installDir 'config.toml'
+          Set-Content -LiteralPath $cfgPath -Value $cfgLines -Encoding utf8
+          # 安装脚本第一步也会 --check-config;先显式过一遍,报错更直观
+          & (Join-Path $installDir 'monitor-agent.exe') --check-config $cfgPath
+          if ($LASTEXITCODE -ne 0) { throw "config check failed (exit $LASTEXITCODE)" }
+          "SW_DIR=$installDir" >> $env:GITHUB_ENV
+          "SW_DATA=$dataDir" >> $env:GITHUB_ENV
+          "SW_CONFIG=$cfgPath" >> $env:GITHUB_ENV
+
+      - name: install via install-service.ps1 (真实安装:New-Service + 失败恢复动作 + Start-Service + /ready 轮询)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = & pwsh -NoProfile -File docs/deploy/windows/install-service.ps1 `
+            -InstallDir $env:SW_DIR -ConfigPath $env:SW_CONFIG -DataDir $env:SW_DATA `
+            -ServiceName $env:SW_SERVICE *>&1 | Out-String
+          $out | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) { throw "install-service.ps1 failed (exit $LASTEXITCODE)" }
+
+      - name: assert service RUNNING + 注册形态 (binPath 带 --service-run;failure 动作 restart/5000)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # RUNNING 轮询(≤30s;SCM 状态即真相)
+          $q = ''
+          $deadline = (Get-Date).AddSeconds(30)
+          while ((Get-Date) -lt $deadline) {
+            $q = (sc.exe query $env:SW_SERVICE | Out-String)
+            if ($q -match 'RUNNING') { break }
+            Start-Sleep -Seconds 1
+          }
+          if ($q -notmatch 'RUNNING') { throw "service not RUNNING within 30s; last query: $q" }
+          # 注册形态:binPath 必须是 --service-run 的 SCM 感知形态(装错二进制
+          # 会在 stop 阶段以强杀收场,提前在这里拦下)
+          $qc = (sc.exe qc $env:SW_SERVICE | Out-String)
+          Write-Host $qc
+          if ($qc -notmatch '--service-run') { throw "binPath missing --service-run: $qc" }
+          # 失败恢复动作(脚本 §4):reset= 86400 + restart/5000 三槽位
+          $qf = (sc.exe qfailure $env:SW_SERVICE | Out-String)
+          Write-Host $qf
+          if ($qf -notmatch 'RESTART' -or $qf -notmatch '5000') { throw "failure actions not configured: $qf" }
+
+      - name: assert GET /health 200
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ok = $false
+          for ($i = 0; $i -lt 30 -and -not $ok; $i++) {
+            try {
+              $r = Invoke-WebRequest -Uri 'http://127.0.0.1:9170/health' -TimeoutSec 2
+              if ($r.StatusCode -eq 200) { $ok = $true }
+            } catch { }
+            if (-not $ok) { Start-Sleep -Seconds 1 }
+          }
+          if (-not $ok) { throw 'GET /health did not return 200 within 30s' }
+          Write-Host "/health 200 (attempt $($i + 1))"
+
+      - name: assert 服务模式文件日志 + journal spawn 事务落盘
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # F15:服务模式 tracing 重定向 --log-file(安装脚本固定 <DataDir>\agent.log)
+          $log = Join-Path $env:SW_DATA 'agent.log'
+          if (-not (Test-Path -LiteralPath $log -PathType Leaf)) { throw "service-mode file log missing: $log" }
+          if ((Get-Item -LiteralPath $log).Length -eq 0) { throw "service-mode file log is empty: $log" }
+          $tail = Get-Content -LiteralPath $log -Tail 200 | Out-String
+          if ($tail -notmatch 'all tasks started; agent ready') { throw "startup marker missing in agent.log (tail 200)" }
+          # journal:启动即建文件;监督目标 spawn 事务为确定性内容(≤20s 轮询)
+          $jr = Join-Path $env:SW_DATA 'journal.jsonl'
+          $journal = ''
+          $deadline = (Get-Date).AddSeconds(20)
+          while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $jr -PathType Leaf) {
+              $journal = (Get-Content -LiteralPath $jr -Raw)
+              if ($journal -match '"type":"spawn_intent"' -and $journal -match '"type":"spawn_outcome"') { break }
+            }
+            Start-Sleep -Seconds 1
+          }
+          if ($journal -notmatch '"type":"spawn_intent"') { throw "journal missing spawn_intent line within 20s: $jr" }
+          # P2(第十二轮验证):失败 spawn 也写 outcome(identity:null)—— 必须断言
+          # pid_confirmed:true 才能证明监督链路 spawn 成功。
+          if ($journal -notmatch '"pid_confirmed":true') { throw "journal has spawn_outcome but no successful pid_confirmed:true within 20s: $jr" }
+          Write-Host "agent.log $((Get-Item -LiteralPath $log).Length) bytes; journal.jsonl has spawn_intent + spawn_outcome"
+
+      - name: assert 优雅停机 (sc stop → 轮询 STOPPED ≤60s → /health 不再应答 → agent.log 停机标记 reason=Clean)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # sc stop = SERVICE_CONTROL_STOP → control handler 触发 request_shutdown
+          # → 与信号停机相同的完整停机序列(~1.6s 有界)→ 报告 Stopped。
+          # 轮询上限 60s = StopPending wait hint(30s)的 2 倍。
+          sc.exe stop $env:SW_SERVICE | ForEach-Object { Write-Host $_ }
+          $q = ''
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Get-Date) -lt $deadline) {
+            $q = (sc.exe query $env:SW_SERVICE | Out-String)
+            if ($q -match 'STOPPED') { break }
+            Start-Sleep -Seconds 1
+          }
+          if ($q -notmatch 'STOPPED') { throw "service did not reach STOPPED within 60s (graceful window); last: $q" }
+          # 进程确已退出:端口释放后 /health 应拒绝连接(≤10s 内收口)
+          $down = $false
+          $deadline = (Get-Date).AddSeconds(10)
+          while ((Get-Date) -lt $deadline -and -not $down) {
+            try {
+              $r = Invoke-WebRequest -Uri 'http://127.0.0.1:9170/health' -TimeoutSec 2
+              if ($r.StatusCode -ne 200) { $down = $true }
+            } catch { $down = $true }
+            if (-not $down) { Start-Sleep -Seconds 1 }
+          }
+          if (-not $down) { throw 'GET /health still answers 200 after service STOPPED — process did not exit' }
+          # 优雅停机证据:SCM stop 转进程内停机请求 + 停机序列收尾为 Clean
+          $all = Get-Content -LiteralPath (Join-Path $env:SW_DATA 'agent.log') -Raw
+          if ($all -notmatch 'in-process shutdown requested') { throw "agent.log missing SCM-stop marker 'in-process shutdown requested'" }
+          if ($all -notmatch 'shutdown complete') { throw "agent.log missing 'shutdown complete'" }
+          if ($all -notmatch 'reason=Clean') { throw "agent.log missing 'reason=Clean' — stop was not a clean graceful shutdown" }
+          # Job Object 演练(Windows 实机验收自动化):监督子进程在 agent 退出后
+          # 必须存活 —— Job Object 无 KILL_ON_JOB_CLOSE,观察者外置契约。
+          Start-Sleep -Seconds 2
+          $orphan = Get-Process ping -ErrorAction SilentlyContinue
+          if (-not $orphan) { throw 'supervised child (ping -t) did NOT survive agent exit — Job Object kill-on-close semantics leaked (observer-external contract broken)' }
+          Write-Host "supervised child survived agent exit (pid(s): $($orphan.Id -join ',')) — Job Object observer-external contract OK"
+
+      - name: assert 安装幂等 (已存在 fail-fast 守卫 → 先 delete 再 install 的文档化重装路径成功)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 脚本口径(docs/deploy/windows/install-service.ps1 §3):幂等性交还
+          # 给运维 —— 服务已存在时 fail-fast 并给出 "先 delete 再 install" 指引。
+          # 1) 已存在重装必须失败且报"已存在"(守卫未被静默绕过)
+          $out = & pwsh -NoProfile -File docs/deploy/windows/install-service.ps1 `
+            -InstallDir $env:SW_DIR -ConfigPath $env:SW_CONFIG -DataDir $env:SW_DATA `
+            -ServiceName $env:SW_SERVICE *>&1 | Out-String
+          $out | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -eq 0) { throw 'second install succeeded while service exists — already-exists guard broken' }
+          # P1(第十二轮验证):守卫消息含中文,CI runner OEM 代码页 (cp437) 下
+          # CJK 输出有损编码会假红 —— 改匹配消息中唯一的 ASCII 片段 `(state=`
+          # (仅出现在已存在守卫消息,编码免疫)。
+          if ($out -notmatch '\(state=') { throw 'second install failed but not with the documented already-exists message' }
+          # 2) sc delete + 轮询消失(1060,≤30s)
+          sc.exe delete $env:SW_SERVICE | ForEach-Object { Write-Host $_ }
+          $gone = $false
+          $deadline = (Get-Date).AddSeconds(30)
+          while ((Get-Date) -lt $deadline) {
+            sc.exe query $env:SW_SERVICE 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 1060) { $gone = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $gone) { throw 'service still queryable 30s after sc delete' }
+          # 3) 文档化重装路径:install 成功 → RUNNING(≤30s)→ /health 200
+          #    (同时证明首次 stop 后 9170 端口可重绑)
+          $out = & pwsh -NoProfile -File docs/deploy/windows/install-service.ps1 `
+            -InstallDir $env:SW_DIR -ConfigPath $env:SW_CONFIG -DataDir $env:SW_DATA `
+            -ServiceName $env:SW_SERVICE *>&1 | Out-String
+          $out | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) { throw "documented reinstall path (delete then install) failed (exit $LASTEXITCODE)" }
+          $q = ''
+          $deadline = (Get-Date).AddSeconds(30)
+          while ((Get-Date) -lt $deadline) {
+            $q = (sc.exe query $env:SW_SERVICE | Out-String)
+            if ($q -match 'RUNNING') { break }
+            Start-Sleep -Seconds 1
+          }
+          if ($q -notmatch 'RUNNING') { throw "reinstalled service not RUNNING within 30s: $q" }
+          $ok = $false
+          for ($i = 0; $i -lt 15 -and -not $ok; $i++) {
+            try {
+              $r = Invoke-WebRequest -Uri 'http://127.0.0.1:9170/health' -TimeoutSec 2
+              if ($r.StatusCode -eq 200) { $ok = $true }
+            } catch { }
+            if (-not $ok) { Start-Sleep -Seconds 1 }
+          }
+          if (-not $ok) { throw 'GET /health not 200 after reinstall (port rebind failed?)' }
+
+      - name: assert 热重载 (POST /v1/reload 增量拓扑 → /status 反映新 check)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # F14 在 Windows 服务形态的真实路径:SIGHUP 仅 Unix —— 服务走 POST /v1/reload。
+          # config2 = 原配置 + 追加一个必然可达的自愈 tcp check(指向本控制平面)。
+          $cfg2 = Join-Path $env:SW_DIR 'config.reload.toml'
+          # 数组拼接而非 here-string —— pwsh here-string 闭合标记必须顶格,
+          # 在 YAML 块标量缩进内是已知的踩坑点;数组写法与 config 生成步骤同款。
+          $reloadLines = @(
+            (Get-Content -LiteralPath $env:SW_CONFIG -Raw).TrimEnd()
+            ''
+            '[[check]]'
+            'name = "added-by-reload"'
+            'kind = "tcp"'
+            'addr = "127.0.0.1:9170"'
+            'interval = "5s"'
+            'timeout = "3s"'
+          )
+          Set-Content -LiteralPath $cfg2 -Value $reloadLines -Encoding utf8
+          # reload 前先离线校验(与文档口径一致)
+          & (Join-Path $env:SW_DIR 'monitor-agent.exe') --check-config $cfg2
+          if ($LASTEXITCODE -ne 0) { throw "reload config check failed (exit $LASTEXITCODE)" }
+          $resp = Invoke-WebRequest -Method Post -Uri 'http://127.0.0.1:9170/v1/reload' `
+            -ContentType 'application/json' -Body ('{"path":"' + ($cfg2 -replace '\\','/') + '"}') -TimeoutSec 10
+          if ($resp.StatusCode -ne 202) { throw "reload returned $($resp.StatusCode), expected 202" }
+          # 轮询 /status 直到新 check 出现(≤20s)
+          $seen = $false
+          $deadline = (Get-Date).AddSeconds(20)
+          while ((Get-Date) -lt $deadline -and -not $seen) {
+            $s = Invoke-RestMethod -Uri 'http://127.0.0.1:9170/status' -TimeoutSec 5
+            $names = @($s.targets | ForEach-Object { $_.name })
+            if ($names -contains 'added-by-reload') { $seen = $true }
+            if (-not $seen) { Start-Sleep -Seconds 1 }
+          }
+          if (-not $seen) { throw 'reloaded check did not appear in /status within 20s' }
+          Write-Host 'reload applied: added-by-reload visible in /status'
+
+      - name: assert 错误退出恢复 (force-kill → SCM failure action 自动拉起 → /health 恢复)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Windows 实机验收「错误退出恢复」自动化:强杀 agent 进程 → SCM 检测到
+          # 未报告退出 → 按 failure 动作(restart 5000ms)自动重启服务 → /health 恢复。
+          $proc = Get-Process monitor-agent -ErrorAction SilentlyContinue
+          if (-not $proc) { throw 'monitor-agent process not found before crash drill' }
+          Stop-Process -InputObject $proc -Force
+          Write-Host 'monitor-agent force-killed; waiting for SCM auto-restart'
+          # P3(第十三轮验证):先观测 down→up 迁移(否则首轮 sc query 可能命中
+          # 强杀瞬间 SCM 尚未刷新的 RUNNING 残影,证据力弱化)。
+          $down = $false
+          $deadline = (Get-Date).AddSeconds(10)
+          while ((Get-Date) -lt $deadline -and -not $down) {
+            $q = (sc.exe query $env:SW_SERVICE | Out-String)
+            if ($q -match 'STOPPED' -or $q -match 'STOP_PENDING') { $down = $true }
+            Start-Sleep -Seconds 1
+          }
+          Write-Host "observed post-kill service state: $($q.Trim())"
+          # 经过失败检测窗口(5000ms restart delay)后回 RUNNING(≤40s)
+          $running = $false
+          $deadline = (Get-Date).AddSeconds(40)
+          while ((Get-Date) -lt $deadline -and -not $running) {
+            $q = (sc.exe query $env:SW_SERVICE | Out-String)
+            if ($q -match 'RUNNING') { $running = $true }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $running) { throw 'service did not auto-restart to RUNNING within 40s after force kill (failure actions broken?)' }
+          # 重启实例就绪:重新 bind 9170 → /health 200(≤20s)
+          $ok = $false
+          $deadline = (Get-Date).AddSeconds(20)
+          while ((Get-Date) -lt $deadline -and -not $ok) {
+            try {
+              $r = Invoke-WebRequest -Uri 'http://127.0.0.1:9170/health' -TimeoutSec 2
+              if ($r.StatusCode -eq 200) { $ok = $true }
+            } catch { }
+            if (-not $ok) { Start-Sleep -Seconds 1 }
+          }
+          if (-not $ok) { throw 'GET /health not 200 after SCM auto-restart' }
+          Write-Host 'crash recovery OK: force kill -> SCM auto-restart -> health 200'
+
+      - name: failure diagnostics (SCM 状态 / qc / 事件日志 / 目录 / 日志尾部 / journal 尾部)
+        # P3(第十二轮验证):timeout 取消时 failure() 不触发,补 cancelled();
+        # dispatcher 前退出的场景只有 SCM System 事件日志可见 (7031/7034/7036)。
+        if: failure() || cancelled()
+        shell: pwsh
+        run: |
+          Write-Host '== sc.exe query =='
+          sc.exe query $env:SW_SERVICE
+          Write-Host '== sc.exe qc =='
+          sc.exe qc $env:SW_SERVICE
+          Write-Host '== processes (孤儿/崩溃定位用) =='
+          Get-Process ping, monitor-agent -ErrorAction SilentlyContinue |
+            Select-Object Id, Name, StartTime | Format-Table | Out-String | Write-Host
+          Write-Host '== SCM System event log (Service Control Manager) =='
+          Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } -MaxEvents 10 -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host ("{0} [{1}] {2}" -f $_.TimeCreated, $_.Id, $_.Message) }
+          if (-not $env:SW_DIR) { return }
+          Write-Host '== install dir =='
+          Get-ChildItem -LiteralPath $env:SW_DIR -Recurse -Force -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+          $log = Join-Path $env:SW_DATA 'agent.log'
+          if (Test-Path -LiteralPath $log) {
+            Write-Host '== agent.log tail 80 =='
+            Get-Content -LiteralPath $log -Tail 80 | Write-Host
+          }
+          $jr = Join-Path $env:SW_DATA 'journal.jsonl'
+          if (Test-Path -LiteralPath $jr) {
+            Write-Host '== journal.jsonl tail 40 =='
+            Get-Content -LiteralPath $jr -Tail 40 | Write-Host
+          }
+
+      - name: cleanup (stop → delete → 目录清理;失败路径也执行)
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # best-effort 停服(可能已 Stopped / 不存在)
+          sc.exe stop $env:SW_SERVICE 2>$null
+          $deadline = (Get-Date).AddSeconds(30)
+          while ((Get-Date) -lt $deadline) {
+            $q = (sc.exe query $env:SW_SERVICE 2>$null | Out-String)
+            if ($LASTEXITCODE -ne 0 -or $q -match 'STOPPED') { break }
+            Start-Sleep -Seconds 1
+          }
+          sc.exe delete $env:SW_SERVICE 2>$null
+          if ($env:SW_DIR -and (Test-Path -LiteralPath $env:SW_DIR)) {
+            Remove-Item -LiteralPath $env:SW_DIR -Recurse -Force
+            Write-Host "removed $env:SW_DIR"
+          }
+          $left = Get-Service | Where-Object { $_.Name -eq $env:SW_SERVICE }
+          if ($null -eq $left) { Write-Host 'service removed: yes' }
+          else { Write-Host "service still present (state=$($left.Status)) — sc delete 已标记,句柄释放后消失" }

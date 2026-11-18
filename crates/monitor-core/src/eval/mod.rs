@@ -20,6 +20,18 @@
 //!    [`Scheduler::reconcile_spawn_intent`]) 发现「意图无结果」= 未知实例窗口：
 //!    digest 匹配当前定义 → 跳过冷启动 (防双实例)+ ERROR + Audit + FSM Suspect,
 //!    仅 monitorctl reset 解除;digest 不匹配 (旧定义遗留)→ 照常冷启动。
+//! 9. F27 目标级静默:`ControlCommand::Silence/Unsilence`(`POST|DELETE
+//!    /v1/silence/{target}`)维护按 target 的通知抑制窗口 (单调时钟 deadline,
+//!    与墙钟无关):窗口内 Alert/Escalate/Flap 不入 AlertQueue(通知不投递),
+//!    **Resolve 永不静默**;journal Incident 事件照常写 (历史完整性),恢复
+//!    FSM/检查状态机完全不受影响 —— 静默只作用于通知管道 (§7.3)。建立/解除/
+//!    到期/首次抑制命中各写一条 journal Audit (期内抑制不逐条记录，防刷屏)。
+//! 10. F31 定期维护窗口:`cfg.maintenance` 构建时解析 (该段不热应用，变更
+//!     要求重启),UTC 墙钟驱动的周期抑制 —— 判定为纯函数注入 epoch 秒
+//!     ([`maintenance`]),与 F27 静默叠加「任一命中即抑制」;Resolve 与 Fatal
+//!     合成告警恒穿透。窗口开启/关闭各写一条 journal Audit (每 tick 边沿
+//!     判定 + per-window 状态位);判定无持久状态，按 UTC 时钟自然重入，
+//!     重启后自动生效 (§7.3)。
 //!
 //! 时间：调度用 tokio 时间 (测试可 `start_paused`);状态机一律接收单调 `Instant` 参数。
 //!
@@ -51,6 +63,7 @@
 
 pub mod check;
 pub mod incident;
+pub mod maintenance;
 pub(crate) mod reload;
 pub mod state;
 
@@ -60,6 +73,7 @@ use crate::error::{CoreError, Result};
 use crate::eval::check::{ProbeCtx, ProbeResult, execute as execute_probe};
 use crate::eval::incident::IncidentTracker;
 use crate::eval::state::{CheckStateMachine, Thresholds};
+use crate::model::alert::RECOVER_CHECK;
 use crate::model::alert::{AlertEvent, Category, Severity};
 use crate::model::control::{
     ControlCommand, HealthLevel, MetricsSample, RecoveryState, StatusReport, TargetMode,
@@ -84,8 +98,10 @@ use reload::TopologyDiff;
 /// 单次 tick 的最大间隔：恢复状态机的内部截止时刻不对外暴露，靠本上限兜底唤醒。
 const MAX_TICK: Duration = Duration::from_secs(1);
 
-/// Fatal 告警的 check 名 (incident key = hash(target, "__recover__"),任务约定)。
-const RECOVER_CHECK: &str = "__recover__";
+/// F27 静默时长上限 (秒，7 天):`duration_secs = 0` 或超限由 eval 侧拒绝
+/// (WARN + journal 审计;HTTP 端点已 202 入队 —— 与 restart/check 的
+/// 「入队 202 + eval 拒绝审计」模式一致)。
+const SILENCE_MAX_SECS: u64 = 604_800;
 
 /// 调度器与外界的一切交互句柄 (runtime 负责装配)。
 pub struct SchedulerHandles {
@@ -113,6 +129,10 @@ pub struct SchedulerHandles {
     /// 启动配置路径 (F14 热重载缺省目标:`ControlCommand::Reload { path: None }`
     /// 时回填;runtime 经 `run_with_config` 传入)。
     pub config_path: PathBuf,
+    /// F33:生效配置视图出口 —— reload 成功后 eval 推送新 redacted JSON,
+    /// 控制面 /v1/config 经 watch 接收端读取 (reload 后即新值;无接收端时
+    /// send 静默丢弃，控制面未启用即此形态)。
+    pub config_view_tx: watch::Sender<Arc<serde_json::Value>>,
 }
 
 /// 主循环。本任务由 runtime abort 停机;control/snapshot 通道关闭不算停机信号
@@ -133,6 +153,11 @@ pub async fn run(cfg: Config, mut h: SchedulerHandles) -> Result<()> {
             .cold_start(sidx, &replayed, now, now_wall, &mut h)
             .await;
     }
+
+    // F25 incident 跨重启恢复 (重放后、调度开始前):journal 重放出的仍 open
+    // 的 incident 注入引擎并为每起产出一条重通知 (走既有 AlertQueue 链路);
+    // 空表零行为变化 (向后兼容)。
+    sched.restore_incidents(&replayed, now, now_wall, &mut h);
 
     let mut control_open = true;
     let mut snapshot_open = true;
@@ -243,6 +268,21 @@ struct WatchRt {
     pidfile: Option<std::path::PathBuf>,
 }
 
+/// F27 单个 target 的静默窗口条目:key = target 名 (与 AlertEvent.target
+/// 同一命名空间:`labels()` 的 target 标签)。deadline 用**单调时钟** Instant
+/// (`建立时刻 + duration`),与墙钟回拨/跳变无关 —— 到期语义由 tick 惰性清理
+/// 与 emit_alert 的 `until > now` 双重保证。
+#[derive(Debug, Clone)]
+struct SilenceEntry {
+    /// 静默截止时刻 (单调)。`until <= now` 视为已过期 (待 tick 清理)。
+    until: Instant,
+    /// 运维填写的审计原因 (可空)。
+    reason: Option<String>,
+    /// 同一静默期内是否已写过「抑制命中」可见性 Audit:首次抑制命中置位，
+    /// 期内不再逐条记录 (防刷屏);重复 Silence 覆盖后复位 (新窗口新边沿)。
+    suppressed_notice: bool,
+}
+
 /// 调度器全部状态 (单写者独占，零锁)。
 struct Scheduler {
     checks: Vec<CheckRt>,
@@ -277,6 +317,12 @@ struct Scheduler {
     /// 当前生效配置 (F14:热重载 diff 的 old 侧。非拓扑段不热应用 ——
     /// collect_interval 与 tracker/thresholds 保持构建时值)。
     active_cfg: Config,
+    /// F33:启动配置的 redacted JSON 快照 —— /v1/config 视图中**要求重启的
+    /// 段** (agent/log/control/collect/alert/metrics/maintenance) 恒取此值
+    /// (reload 不热应用这些段，展示未生效的文件值会误导运维);拓扑段
+    /// (check/service/watch) 由 apply_reload 时的新值覆盖 (P2 第十一轮验证
+    /// 修复：视图从"整份新文件"改为"启动值 + 新拓扑"合并)。
+    startup_config_view: Arc<serde_json::Value>,
     /// 检查状态机阈值 (启动时 alert 配置;alert 段不热应用，reload 新增的
     /// check 沿用启动阈值，保持全体一致)。
     thresholds: Thresholds,
@@ -287,6 +333,16 @@ struct Scheduler {
     /// F18 历史指标环形缓冲 (本任务单写者;control 侧经发布报告里的同一句柄
     /// 只读快照)。每轮 tick 发布 metrics 时入环，上限 [`METRICS_HISTORY_CAP`]。
     metrics_history: MetricsHistoryRing,
+    /// F27 目标级静默表 (key = target 名，与 AlertEvent.target 同一命名空间)。
+    /// 单写者独占;重复 Silence 后到覆盖，Unsilence 移除，过期由 tick 惰性清理。
+    silences: std::collections::HashMap<String, SilenceEntry>,
+    /// F31 定期维护窗口 (构建时从 `cfg.maintenance` 解析;该段不热应用 ——
+    /// 变更要求重启，与 alert 段同口径)。判定无持久状态 (UTC 墙钟自然重入)。
+    maintenance: Vec<maintenance::MaintenanceWindow>,
+    /// F31 每窗口 in_window 状态位 (key = 窗口索引):tick 边沿判定，
+    /// 开/关各写恰好一条 journal Audit;缺失视为 false (agent 启动即处于
+    /// 窗口内时，首轮 tick 写一条 opened —— 提示运维当前处于抑制窗口)。
+    maintenance_in_window: std::collections::HashMap<usize, bool>,
 }
 
 /// process 检查的一次身份解析结果 (全部 owned，探测任务内无共享借用)。
@@ -522,10 +578,14 @@ impl Scheduler {
             planned_stops: std::collections::HashSet::new(),
             planned_stop_deadlines: std::collections::HashMap::new(),
             active_cfg: cfg.clone(),
+            startup_config_view: Arc::new(serde_json::json!(cfg.redacted())),
             thresholds,
             pending_reap: Vec::new(),
             retired_orphans: std::collections::HashMap::new(),
             metrics_history: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            silences: std::collections::HashMap::new(),
+            maintenance: maintenance::MaintenanceWindow::from_cfgs(&cfg.maintenance),
+            maintenance_in_window: std::collections::HashMap::new(),
         }
     }
 
@@ -669,12 +729,111 @@ impl Scheduler {
     }
 
     // -----------------------------------------------------------------
+    // F25 incident 跨重启恢复
+    // -----------------------------------------------------------------
+
+    /// F25:journal 重放出的仍 open 的 incident 恢复进引擎 (启动时调用一次，
+    /// 在冷启动与首轮 tick 之间、**调度开始前**)。
+    ///
+    /// - 每起恢复的 incident 经 [`IncidentTracker::restore`] 注入 (trail 以
+    ///   「已通知」状态注入),并同步产出一条**启动重通知**:类别复用
+    ///   [`Category::Alert`](不新增枚举，DESIGN「恢复重通知」语义)、severity
+    ///   用恢复值、reason = `restored from journal: <原 reason>`;走既有
+    ///   AlertQueue 链路 + journal Incident 事件 (journal 门随重通知刷新
+    ///   reason/last_event_at,保持写路径一致性)。
+    /// - 重通知即**新 renotify 窗口起点**(trail.last_notified = 本调用时刻),
+    ///   延续「首条通知永不冷却」:恢复后必然至少可再告警一次。
+    /// - **flap 计数器不恢复**(transitions/抑制集 fresh,ROADMAP F25 取舍);
+    ///   检查状态机亦不回填 (保持恢复确认语义保守：健康类失败仍需 live 探测
+    ///   重新升级，/metrics `checks_*` 随首轮探测自然反映)。
+    /// - 空表零行为变化 (向后兼容);key 复算口径与运行期一致
+    ///   ([`AlertEvent::incident_key`],不信任 journal 持久化值)。
+    fn restore_incidents(
+        &mut self,
+        replayed: &JournalState,
+        now_mono: Instant,
+        now_wall: SystemTime,
+        h: &mut SchedulerHandles,
+    ) {
+        if replayed.open_incidents.is_empty() {
+            return;
+        }
+        let total = replayed.open_incidents.len();
+        let mut restored = 0usize;
+        for inc in replayed.open_incidents.values() {
+            // P2(第九轮验证):Fatal 的合成 incident (check = RECOVER_CHECK) 属恢复
+            // 域 —— target 已不 Fatal (reset 后重启/legacy journal) 时跳过恢复，
+            // 否则每次重启都发一次虚假 "latched fatal" 重通知。正常路径下 journal
+            // 侧 Reset 分支已闭门，此处是库调用方手构 JournalState 的防御层。
+            if inc.check == RECOVER_CHECK && !replayed.fatal.contains(&inc.target) {
+                continue;
+            }
+            // journal 只保留最后一次事件时刻/原因，occurrences 不可知 → 1 起步。
+            if !self.tracker.restore(
+                now_mono,
+                inc.last_event_at,
+                &inc.target,
+                &inc.check,
+                inc.severity,
+                1,
+            ) {
+                continue; // 防御：同 key 已存在 (正常启动不可能)
+            }
+            restored += 1;
+            // P3(第九轮验证):恢复重通知本身会写回 journal 门表，若不判前缀，
+            // 每次重启都会叠一层 "restored from journal: "。
+            let reason = if inc.reason.starts_with("restored from journal: ") {
+                inc.reason.clone()
+            } else {
+                format!("restored from journal: {}", inc.reason)
+            };
+            let ev = AlertEvent {
+                incident: AlertEvent::incident_key(&inc.target, &inc.check),
+                category: Category::Alert,
+                severity: inc.severity,
+                target: inc.target.clone(),
+                check: inc.check.clone(),
+                reason: reason.clone(),
+                observed: None,
+                first_seen: inc.last_event_at,
+                last_seen: now_wall,
+                occurrences: 1,
+            };
+            self.emit_alert(&ev, now_mono, now_wall, h);
+            journal(
+                h,
+                JournalEvent::Incident {
+                    at: now_wall,
+                    incident: ev.incident,
+                    target: ev.target.clone(),
+                    check: ev.check.clone(),
+                    category: ev.category,
+                    severity: ev.severity,
+                    reason: ev.reason.clone(),
+                },
+            );
+        }
+        if restored > 0 {
+            tracing::info!(
+                restored,
+                total,
+                "open incidents restored from journal; re-notification emitted (renotify window restarted)"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
     // 每轮 tick
     // -----------------------------------------------------------------
 
     async fn tick(&mut self, h: &mut SchedulerHandles) {
         let now_mono = Instant::now();
         let now_wall = SystemTime::now();
+        // 0)F27 静默到期惰性清理：过期窗口移除并各写一条到期 Audit (边沿一次)。
+        self.expire_silences(now_mono, now_wall, h);
+        // 0)F31 维护窗口开/关 Audit 边沿 (UTC 墙钟判定;tick 粒度 = MAX_TICK 1s,
+        //    与配置校验 duration ≥ 60s 匹配，边沿不丢)。
+        self.update_maintenance_edges(now_wall, h);
         // 只克隆 Arc(采集快照整体不可变);Ref 立即释放，无跨 await 借用。
         let snap: Arc<CollectOutput> = h.snapshot_rx.borrow().clone();
 
@@ -1064,7 +1223,7 @@ impl Scheduler {
             observed,
         );
         for ev in &events {
-            self.emit_alert(ev, h);
+            self.emit_alert(ev, now_mono, now_wall, h);
             journal(
                 h,
                 JournalEvent::Incident {
@@ -1776,7 +1935,7 @@ impl Scheduler {
                         last_seen: now_wall,
                         occurrences: 1,
                     };
-                    self.emit_alert(&ev, h);
+                    self.emit_alert(&ev, now_mono, now_wall, h);
                     journal(
                         h,
                         JournalEvent::Incident {
@@ -1801,6 +1960,91 @@ impl Scheduler {
     // -----------------------------------------------------------------
     // 控制平面命令 (§9.2)
     // -----------------------------------------------------------------
+
+    /// F27 静默到期惰性清理 (周期 tick 调用，MAX_TICK=1s 兜底驱动):移除
+    /// `until <= now_mono` 的窗口并各写一条到期 Audit —— 条目随即移除，
+    /// 每个过期窗口恰好一条 (边沿),过期条目不得残留。emit_alert 侧对过期
+    /// 条目 (`until > now` 不成立) 本就放行，本方法只负责审计与内存卫生。
+    fn expire_silences(&mut self, now_mono: Instant, now_wall: SystemTime, h: &SchedulerHandles) {
+        let expired: Vec<String> = self
+            .silences
+            .iter()
+            .filter(|(_, entry)| entry.until <= now_mono)
+            .map(|(target, _)| target.clone())
+            .collect();
+        for target in expired {
+            self.silences.remove(&target);
+            tracing::info!(target = %target, "silence expired");
+            journal(
+                h,
+                JournalEvent::Audit {
+                    at: now_wall,
+                    message: format!("silence expired for target {target}"),
+                },
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // F31 定期维护窗口 (§7.3;UTC 墙钟判定，无持久状态)
+    // -----------------------------------------------------------------
+
+    /// F31:该 target 当前是否命中任一维护窗口 (target 前缀/`*` 匹配同
+    /// `[[alert.routes]]`,窗口判定纯函数见 [`maintenance`])。时间来自注入的
+    /// `now_wall`,判定函数内不读钟 (时间注入纪律)。
+    fn maintenance_hit(&self, target: &str, now_wall: SystemTime) -> bool {
+        let secs = epoch_secs(now_wall);
+        self.maintenance
+            .iter()
+            .any(|w| w.matches_target(target) && w.contains(secs))
+    }
+
+    /// F31 窗口开/关 Audit 边沿 (周期 tick 调用，MAX_TICK=1s 粒度):每窗口
+    /// 维护一个 in_window 状态位，与上一状态比较，翻转即写**恰好一条**
+    /// journal Audit (有 name 报 name，无 name 报 targets)。窗口按 UTC 时钟
+    /// 自然重入，判定无持久状态 —— agent 重启后状态位清零：启动即处于窗口内
+    /// 时首轮 tick 写一条 opened (提示运维「当前处于抑制窗口」,与 F27 静默
+    /// 「重启即失忆」不同：维护窗口由配置定义，重启后自动恢复生效)。
+    fn update_maintenance_edges(&mut self, now_wall: SystemTime, h: &SchedulerHandles) {
+        if self.maintenance.is_empty() {
+            return;
+        }
+        let secs = epoch_secs(now_wall);
+        for (idx, w) in self.maintenance.iter().enumerate() {
+            let in_window = w.contains(secs);
+            let prev = self
+                .maintenance_in_window
+                .insert(idx, in_window)
+                .unwrap_or(false);
+            match (in_window, prev) {
+                (true, false) => {
+                    tracing::info!(window = %w.label(), "maintenance window opened");
+                    journal(
+                        h,
+                        JournalEvent::Audit {
+                            at: now_wall,
+                            message: format!(
+                                "maintenance window opened: {} (UTC; Alert/Escalate/Flap \
+                                 suppressed for matching targets)",
+                                w.label()
+                            ),
+                        },
+                    );
+                }
+                (false, true) => {
+                    tracing::info!(window = %w.label(), "maintenance window closed");
+                    journal(
+                        h,
+                        JournalEvent::Audit {
+                            at: now_wall,
+                            message: format!("maintenance window closed: {}", w.label()),
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
 
     async fn handle_control(
         &mut self,
@@ -2133,6 +2377,104 @@ impl Scheduler {
                     }
                 }
             }
+            ControlCommand::Silence {
+                target,
+                duration_secs,
+                reason,
+            } => {
+                // F27 目标级静默:eval 侧校验 (端点已 202 入队 —— 拒绝走
+                // WARN + journal 审计，与 restart/check 的模式一致)。
+                if duration_secs == 0 || duration_secs > SILENCE_MAX_SECS {
+                    tracing::warn!(
+                        target = %target,
+                        duration_secs,
+                        "silence rejected: duration out of range"
+                    );
+                    journal(
+                        h,
+                        JournalEvent::Audit {
+                            at: now_wall,
+                            message: format!(
+                                "silence rejected for {target}: duration {duration_secs}s out of range 1..={SILENCE_MAX_SECS}"
+                            ),
+                        },
+                    );
+                    return;
+                }
+                // target 校验 (ROADMAP F27「不存在的 target 由 eval 侧拒绝」):
+                // 与 AlertEvent.target 同一命名空间 —— 独立检查名 / supervise
+                // 服务名 / watch 名 (绑定检查的 target 是服务或 watch 名)。
+                let known = self.checks.iter().any(|c| {
+                    c.cfg.name == target && c.bound_service.is_none() && c.bound_watch.is_none()
+                }) || self.svcs.iter().any(|s| s.cfg.name == target)
+                    || self.watches.iter().any(|w| w.name == target);
+                if !known {
+                    tracing::warn!(target = %target, "silence rejected: unknown target");
+                    journal(
+                        h,
+                        JournalEvent::Audit {
+                            at: now_wall,
+                            message: format!("silence rejected: {target} is not a known target"),
+                        },
+                    );
+                    return;
+                }
+                // deadline = 单调时钟 (now + duration),与墙钟无关;重复设置
+                // 后到覆盖 (新条目整体替换，抑制可见性边沿随新窗口复位)。
+                let until = now_mono + Duration::from_secs(duration_secs);
+                self.silences.insert(
+                    target.clone(),
+                    SilenceEntry {
+                        until,
+                        reason: reason.clone(),
+                        suppressed_notice: false,
+                    },
+                );
+                tracing::info!(
+                    target = %target,
+                    duration_secs,
+                    "silence set via control plane"
+                );
+                journal(
+                    h,
+                    JournalEvent::Audit {
+                        at: now_wall,
+                        message: format!(
+                            "silence set for {target}: {duration_secs}s (monotonic deadline, auto-expires; Alert/Escalate/Flap suppressed){}",
+                            reason
+                                .as_deref()
+                                .map(|r| format!("; reason: {r}"))
+                                .unwrap_or_default()
+                        ),
+                    },
+                );
+            }
+            ControlCommand::Unsilence { target } => {
+                // F27 提前解除：移除窗口并写审计;无活动静默 → WARN + 审计
+                // (与 check/restart 的未知目标处理一致)。
+                if let Some(entry) = self.silences.remove(&target) {
+                    let remain = entry.until.duration_since(now_mono).as_secs();
+                    tracing::info!(target = %target, "silence removed via control plane");
+                    journal(
+                        h,
+                        JournalEvent::Audit {
+                            at: now_wall,
+                            message: format!(
+                                "silence removed for {target} (manual unsilence; {remain}s of window discarded)"
+                            ),
+                        },
+                    );
+                } else {
+                    tracing::warn!(target = %target, "unsilence request: no active silence");
+                    journal(
+                        h,
+                        JournalEvent::Audit {
+                            at: now_wall,
+                            message: format!("unsilence request: no active silence for {target}"),
+                        },
+                    );
+                }
+            }
         }
     }
 
@@ -2439,6 +2781,21 @@ impl Scheduler {
         // 生效新配置 (下次 diff 的 old 侧)。tracker 阈值与 collect_interval 保持
         // 旧值 (alert/collect 段不热应用 —— 上方已审计)。
         self.active_cfg = new;
+
+        // F33:生效配置视图随 reload 刷新 —— **合并视图**:拓扑段 (check/
+        // service/watch) 取新文件 (已生效),要求重启的段保持启动值 (P2 第十一
+        // 轮验证修复：旧实现推整份新文件，会把未生效的 control/alert/collect/
+        // maintenance 值展示成"已生效")。敏感字段恒为 redacted 占位。
+        let mut view = (*self.startup_config_view).clone();
+        if let Some(obj) = view.as_object_mut() {
+            let fresh = serde_json::json!(self.active_cfg.redacted());
+            for key in ["check", "service", "watch"] {
+                if let Some(v) = fresh.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+        let _ = h.config_view_tx.send(Arc::new(view));
 
         let summary = format!(
             "reload applied: +{}/-{}/~{} checks, +{}/-{}/~{} services, +{}/-{}/~{} watches",
@@ -2797,7 +3154,77 @@ impl Scheduler {
 
     /// 告警出口：结构化日志 + drop-oldest 有界队列直推 (满时队列内丢最旧并计数，
     /// DESIGN §2.2 背压策略;eval 侧永不阻塞、永不静默丢新事件)。
-    fn emit_alert(&self, ev: &AlertEvent, h: &SchedulerHandles) {
+    ///
+    /// 通知抑制 (§7.3,F27 + F31 叠加，无优先级 —— 任一命中即不入 AlertQueue):
+    /// - F27 目标级静默:`category ∈ {Alert, Escalate, Flap}` 且 target 静默窗口
+    ///   内 (`until > now_mono`,单调时钟)。同一静默期首次抑制命中写一条可见性
+    ///   Audit，期内不再逐条记录 (防刷屏);窗口已过期但 tick 尚未清理的残留
+    ///   条目按「未静默」放行。
+    /// - F31 定期维护窗口:target 命中任一处于 UTC 窗口内的 `[[maintenance]]`
+    ///   (判定纯函数见 [`maintenance`],时间取注入的 now_wall)。每次命中仅记
+    ///   日志不写 journal —— 窗口开启 Audit ([`Self::update_maintenance_edges`])
+    ///   即可见性边沿，抑制期不逐条刷屏。
+    /// - `Resolve` 永不静默 (恢复通知必须穿透);**Fatal 合成告警
+    ///   (`check = RECOVER_CHECK`) 同等豁免** —— 豁免对两类抑制同时生效。
+    ///
+    /// journal Incident 事件由调用方照常写 (历史完整性);抑制只作用于通知
+    /// 管道，与恢复 FSM/检查状态机无关。
+    fn emit_alert(
+        &mut self,
+        ev: &AlertEvent,
+        now_mono: Instant,
+        now_wall: SystemTime,
+        h: &SchedulerHandles,
+    ) {
+        // P1(第十轮验证):Fatal 的合成 incident (check = RECOVER_CHECK) 与 Resolve
+        // 同等豁免 —— 它不经 tracker(无 trail/renotify 兜底),被抑制吞掉后解除
+        // 静默也不补发，「需人工介入」信号在连续运行期间永久丢失。部署/维护
+        // 窗口内 crash loop → 预算耗尽 Fatal 恰是最需要穿透的信号;抑制的降噪
+        // 对象是检查告警噪音，不是 Fatal 闩锁告警 (DESIGN §7.3)。
+        if !matches!(ev.category, Category::Resolve) && ev.check != RECOVER_CHECK {
+            // F27 目标级静默 (内存态，单调 deadline，与墙钟回拨/跳变无关)。
+            if let Some(entry) = self.silences.get_mut(&ev.target)
+                && entry.until > now_mono
+            {
+                if !entry.suppressed_notice {
+                    entry.suppressed_notice = true;
+                    let remain = entry.until.duration_since(now_mono).as_secs();
+                    tracing::info!(
+                        target = %ev.target,
+                        remain_secs = remain,
+                        category = ?ev.category,
+                        "alert suppressed by target silence"
+                    );
+                    journal(
+                        h,
+                        JournalEvent::Audit {
+                            at: now_wall,
+                            message: format!(
+                                "notifications silenced for target {} until +{remain}s (monotonic){}",
+                                ev.target,
+                                entry
+                                    .reason
+                                    .as_deref()
+                                    .map(|r| format!("; reason: {r}"))
+                                    .unwrap_or_default()
+                            ),
+                        },
+                    );
+                }
+                return;
+            }
+            // F31 定期维护窗口 (UTC 墙钟，无状态):与静默叠加，任一命中即抑制。
+            if self.maintenance_hit(&ev.target, now_wall) {
+                tracing::info!(
+                    incident = ev.incident,
+                    target = %ev.target,
+                    check = %ev.check,
+                    category = ?ev.category,
+                    "alert suppressed by maintenance window"
+                );
+                return;
+            }
+        }
         tracing::info!(
             incident = ev.incident,
             target = %ev.target,
@@ -2957,6 +3384,16 @@ fn journal(h: &SchedulerHandles, ev: JournalEvent) {
     if let Err(e) = h.journal_tx.try_send(ev) {
         tracing::warn!(source = %e, "journal queue push failed; event dropped");
     }
+}
+
+/// 注入时刻 → epoch 秒 (F31 维护窗口 UTC 判定的时间换算):纯函数
+/// [`maintenance::MaintenanceWindow::contains`] 接收 epoch 秒，调用方统一在
+/// 此换算 (时间注入纪律 —— 判定函数内不读钟)。epoch 之前的时钟 (不存在于
+/// 现网，防御) 按 0 兜底：窗口判定退化为「今日 00:00 起的 elapsed」仍自洽。
+fn epoch_secs(t: SystemTime) -> u64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// 激活钩子执行：命令 (tokio process + timeout) 或 HTTP POST。
@@ -3132,6 +3569,283 @@ mod tests {
             !Scheduler::dep_is_ready(sched.svcs[db].fsm.state(), true),
             "依赖 Fatal 不得满足"
         );
+    }
+
+    // ---- F25 incident 跨重启恢复 ----
+
+    /// 构造 journal 重放出的 open incident 条目 (F25)。
+    fn persisted_incident(
+        target: &str,
+        check: &str,
+        severity: Severity,
+        reason: &str,
+        last_event_at: SystemTime,
+    ) -> crate::recover::journal::PersistedIncident {
+        crate::recover::journal::PersistedIncident {
+            incident_key: AlertEvent::incident_key(target, check),
+            target: target.to_string(),
+            check: check.to_string(),
+            severity,
+            reason: reason.to_string(),
+            last_event_at,
+        }
+    }
+
+    /// 从告警队列取一个事件 (测试用;1s 超时即失败)。
+    async fn pop_alert(queue: &Arc<crate::alert::AlertQueue>) -> AlertEvent {
+        let (_tx, rx) = watch::channel(false);
+        tokio::time::timeout(Duration::from_secs(1), queue.clone().pop(rx))
+            .await
+            .expect("alert event should arrive")
+            .expect("queue not shut down")
+    }
+
+    fn restore_test_cfg(renotify: &str, flap_threshold: u32) -> Config {
+        Config::from_toml_str(&format!(
+            r#"
+            [alert]
+            renotify_interval = "{renotify}"
+            flap_threshold = {flap_threshold}
+
+            [[check]]
+            name = "c1"
+            kind = "tcp"
+            addr = "127.0.0.1:59999"
+            interval = "10s"
+            timeout = "5s"
+            "#
+        ))
+        .unwrap()
+    }
+
+    /// 恢复主路径:open incidents 注入引擎 (trail 可查)+ 每起一条重通知
+    /// (类别复用 Alert、severity 用恢复值、reason 前缀 restored from journal)
+    /// + journal Incident 事件 + /status incident 立即反映。
+    #[tokio::test]
+    async fn restore_incidents_injects_engine_state_and_renotifies() {
+        let cfg = restore_test_cfg("900s", 100);
+        let (mut h, mut journal_rx, _status_rx, _metrics_rx) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(111);
+        let mut replayed = JournalState::default();
+        // 当前拓扑内 (c1, c1) 的 critical + 拓扑外的遗留条目 (legacy, x):都恢复。
+        replayed.open_incidents.insert(
+            ("c1".into(), "c1".into()),
+            persisted_incident("c1", "c1", Severity::Critical, "port closed", t0),
+        );
+        replayed.open_incidents.insert(
+            ("legacy".into(), "x".into()),
+            persisted_incident("legacy", "x", Severity::Warning, "old trail", t0),
+        );
+
+        sched.restore_incidents(&replayed, Instant::now(), SystemTime::now(), &mut h);
+
+        // 引擎状态:/status 的 incident 字段立即反映 (含拓扑外遗留条目)。
+        assert_eq!(
+            sched.tracker.incident_level("c1", "c1"),
+            Some(HealthLevel::Critical),
+            "恢复的 critical 立即可查"
+        );
+        assert_eq!(
+            sched.tracker.incident_level("legacy", "x"),
+            Some(HealthLevel::Warning)
+        );
+
+        let report = sched.build_status(&h, Instant::now());
+        let t = report.targets.iter().find(|t| t.name == "c1").unwrap();
+        assert_eq!(t.incident, Some(HealthLevel::Critical), "/status 立即呈现");
+
+        // 重通知：两起各一条，类别 Alert,severity 用恢复值，reason 前缀。
+        let mut got = Vec::new();
+        for _ in 0..2 {
+            got.push(pop_alert(&h.alert).await);
+        }
+        let c1_ev = got
+            .iter()
+            .find(|e| e.target == "c1")
+            .expect("c1 re-notification");
+        assert_eq!(
+            c1_ev.category,
+            Category::Alert,
+            "复用 Alert 类别，不新增枚举"
+        );
+        assert_eq!(c1_ev.severity, Severity::Critical);
+        assert_eq!(
+            c1_ev.reason, "restored from journal: port closed",
+            "reason = restored from journal: <原 reason>"
+        );
+        assert_eq!(c1_ev.incident, AlertEvent::incident_key("c1", "c1"));
+        let legacy_ev = got.iter().find(|e| e.target == "legacy").unwrap();
+        assert_eq!(legacy_ev.severity, Severity::Warning);
+        assert_eq!(legacy_ev.reason, "restored from journal: old trail");
+
+        // journal:每起重通知都有 Incident 事件 (写路径一致性)。
+        let events = drain_journal(&mut journal_rx);
+        let incs: Vec<&JournalEvent> = events
+            .iter()
+            .filter(|e| matches!(e, JournalEvent::Incident { .. }))
+            .collect();
+        assert_eq!(incs.len(), 2, "每起恢复各写一条 Incident 事件");
+        for ev in incs {
+            let JournalEvent::Incident {
+                category, reason, ..
+            } = ev
+            else {
+                unreachable!()
+            };
+            assert_eq!(*category, Category::Alert);
+            assert!(reason.starts_with("restored from journal: "), "{reason}");
+        }
+    }
+
+    /// 重通知即新 renotify 窗口起点 + resolve 正常收口。
+    #[tokio::test]
+    async fn restore_restarts_renotify_window_and_resolve_closes() {
+        // renotify = 60s:恢复后 30s 的同级失败必须被抑制 (窗口起点 = 恢复时刻)。
+        let cfg = restore_test_cfg("60s", 100);
+        let (mut h, mut journal_rx, _status_rx, _metrics_rx) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(50);
+        let mut replayed = JournalState::default();
+        replayed.open_incidents.insert(
+            ("c1".into(), "c1".into()),
+            persisted_incident("c1", "c1", Severity::Warning, "down", t0),
+        );
+        // 恢复时刻 (窗口起点)
+        let m0 = Instant::now();
+        sched.restore_incidents(&replayed, m0, t0, &mut h);
+        assert!(
+            pop_alert(&h.alert)
+                .await
+                .reason
+                .starts_with("restored from journal: ")
+        );
+
+        // 窗口内 (恢复 + 30s) 同级失败：被抑制，无重复通知。
+        let within = sched.tracker.observe(
+            t0 + Duration::from_secs(30),
+            m0 + Duration::from_secs(30),
+            "c1",
+            "c1",
+            HealthLevel::Warning,
+            "still down",
+            None,
+        );
+        assert!(
+            within.is_empty(),
+            "恢复后的 renotify 窗口起点生效，窗口内不得重发"
+        );
+
+        // Ok 到来 → Resolve 正常收口 (恢复的 incident 已在引擎内，自然成立)。
+        let resolve = sched.tracker.observe(
+            t0 + Duration::from_secs(40),
+            m0 + Duration::from_secs(40),
+            "c1",
+            "c1",
+            HealthLevel::Ok,
+            "recovered",
+            None,
+        );
+        assert_eq!(resolve.len(), 1, "resolve 必须收口");
+        assert_eq!(resolve[0].category, Category::Resolve);
+        assert_eq!(resolve[0].severity, Severity::Warning);
+        assert_eq!(
+            resolve[0].incident,
+            AlertEvent::incident_key("c1", "c1"),
+            "Resolve 引用原 incident"
+        );
+        assert_eq!(
+            sched.tracker.incident_level("c1", "c1"),
+            None,
+            "闭合后 /status 不再呈现"
+        );
+        // 恢复重通知之外，窗口内的抑制不产生额外 journal Incident 事件;
+        // Resolve 事件由 observe 返回，此处只校验启动期已写一条。
+        let events = drain_journal(&mut journal_rx);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, JournalEvent::Incident { .. }))
+                .count(),
+            1
+        );
+    }
+
+    /// flap 计数器**不**跨重启恢复：恢复后立即闭合 → 走 Resolve 而非 Flap
+    /// (若旧抖动史被恢复，阈值 3 下 open/close 早已跨越)。
+    #[tokio::test]
+    async fn restore_keeps_flap_counters_fresh() {
+        let cfg = restore_test_cfg("900s", 3);
+        let (mut h, _journal_rx, _status_rx, _metrics_rx) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+
+        let t0 = SystemTime::UNIX_EPOCH;
+        let mut replayed = JournalState::default();
+        replayed.open_incidents.insert(
+            ("c1".into(), "c1".into()),
+            persisted_incident("c1", "c1", Severity::Warning, "down", t0),
+        );
+        let m0 = Instant::now();
+        sched.restore_incidents(&replayed, m0, t0, &mut h);
+        let _ = pop_alert(&h.alert).await; // 重通知
+
+        // 新会话 fresh:transitions 环为空，首次 Ok 闭合 → Resolve (count=1 < 3)。
+        let close = sched.tracker.observe(
+            t0 + Duration::from_secs(1),
+            m0 + Duration::from_secs(1),
+            "c1",
+            "c1",
+            HealthLevel::Ok,
+            "ok",
+            None,
+        );
+        assert_eq!(close.len(), 1);
+        assert_eq!(
+            close[0].category,
+            Category::Resolve,
+            "flap 不恢复 → 立即闭合必须走 Resolve 而非 Flap"
+        );
+
+        // 随后正常抖动 2 次 (open/close) 也未达阈值 3:再 open → 正常 Alert。
+        let reopen = sched.tracker.observe(
+            t0 + Duration::from_secs(2),
+            m0 + Duration::from_secs(2),
+            "c1",
+            "c1",
+            HealthLevel::Warning,
+            "down",
+            None,
+        );
+        assert_eq!(reopen.len(), 1);
+        assert_eq!(reopen[0].category, Category::Alert, "首次通知永不冷却");
+        assert_eq!(reopen[0].occurrences, 1, "occurrences 从新会话重新累计");
+    }
+
+    /// 空表零行为变化 (向后兼容):无事件、无 journal 写、引擎无状态。
+    #[tokio::test]
+    async fn restore_with_empty_replay_table_is_noop() {
+        let cfg = restore_test_cfg("900s", 100);
+        let (mut h, mut journal_rx, _status_rx, _metrics_rx) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+
+        sched.restore_incidents(
+            &JournalState::default(),
+            Instant::now(),
+            SystemTime::now(),
+            &mut h,
+        );
+
+        assert_eq!(sched.tracker.incident_level("c1", "c1"), None);
+        let report = sched.build_status(&h, Instant::now());
+        assert!(report.targets.iter().all(|t| t.incident.is_none()));
+        // 告警队列无事件 (pop 必须超时)
+        let (_tx, rx) = watch::channel(false);
+        let popped =
+            tokio::time::timeout(Duration::from_millis(150), h.alert.clone().pop(rx)).await;
+        assert!(popped.is_err(), "空表不得产出任何通知");
+        assert!(drain_journal(&mut journal_rx).is_empty(), "无 journal 写");
     }
 
     /// H-P1 回归:journal 同时含旧 ProcessIdentity 与未决 SpawnIntent(真实崩溃
@@ -3490,6 +4204,12 @@ mod tests {
     fn reload_test_cfg() -> Config {
         Config::from_toml_str(
             r#"
+            [control]
+            token = "tok-startup"
+
+            [alert]
+            webhook_secret = "sec-startup"
+
             [[check]]
             name = "c1"
             kind = "tcp"
@@ -3530,6 +4250,7 @@ mod tests {
         // metrics_rx 一并返回 (接收端存活，send 才会真正更新 watch 当前值)。
         let (metrics_tx, metrics_rx) =
             watch::channel(Arc::new(crate::model::control::MetricsReport::default()));
+        let (config_view_tx, _config_view_rx) = watch::channel(Arc::new(serde_json::Value::Null));
         let counters = Arc::new(crate::alert::AlertCounters::default());
         (
             SchedulerHandles {
@@ -3543,6 +4264,7 @@ mod tests {
                 pm: ProcessManager::new(),
                 replayed: crate::recover::journal::JournalState::default(),
                 config_path: PathBuf::from("test.toml"),
+                config_view_tx,
             },
             status_rx,
             metrics_rx,
@@ -3567,6 +4289,553 @@ mod tests {
             evs.push(ev);
         }
         evs
+    }
+
+    // -----------------------------------------------------------------
+    // F27 目标级静默 (建立/覆盖/解除/拒绝/抑制/到期)
+    // -----------------------------------------------------------------
+
+    fn silence_test_cfg() -> Config {
+        Config::from_toml_str(
+            r#"
+            [[check]]
+            name = "c1"
+            kind = "tcp"
+            addr = "127.0.0.1:59999"
+            interval = "10s"
+            timeout = "5s"
+            "#,
+        )
+        .unwrap()
+    }
+
+    /// 构造告警事件 (静默测试用;独立检查 target = check 名，与 `labels()` 一致)。
+    fn silence_alert_event(target: &str, category: Category) -> AlertEvent {
+        let now = SystemTime::UNIX_EPOCH;
+        AlertEvent {
+            incident: AlertEvent::incident_key(target, target),
+            category,
+            severity: Severity::Critical,
+            target: target.to_string(),
+            check: target.to_string(),
+            reason: "probe failed".into(),
+            observed: None,
+            first_seen: now,
+            last_seen: now,
+            occurrences: 1,
+        }
+    }
+
+    /// 提取 journal Audit message 列表 (静默审计边沿断言用)。
+    fn audit_messages(evs: &[JournalEvent]) -> Vec<&str> {
+        evs.iter()
+            .filter_map(|e| match e {
+                JournalEvent::Audit { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 建立 → 单调 deadline = 建立时刻 + duration;重复 Silence 后到覆盖
+    /// (新 until/reason,抑制边沿复位);Unsilence 移除;无活动静默的解除 →
+    /// 审计拒绝。每条边沿各写一条 journal Audit (含 reason 与到期语义)。
+    #[tokio::test]
+    async fn silence_set_overwrite_unsilence_write_audit_edges() {
+        let cfg = silence_test_cfg();
+        let (mut h, mut journal_rx, _sr, _mr) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+        let t0 = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
+
+        // 建立
+        sched
+            .handle_control(
+                ControlCommand::Silence {
+                    target: "c1".into(),
+                    duration_secs: 3600,
+                    reason: Some("deploy".into()),
+                },
+                t0,
+                wall,
+                &mut h,
+            )
+            .await;
+        assert!(sched.silences.contains_key("c1"));
+        assert_eq!(
+            sched.silences["c1"].until,
+            t0 + Duration::from_secs(3600),
+            "deadline 用单调时钟：建立时刻 + duration"
+        );
+        assert_eq!(sched.silences["c1"].reason.as_deref(), Some("deploy"));
+
+        // 重复设置：后到覆盖
+        sched
+            .handle_control(
+                ControlCommand::Silence {
+                    target: "c1".into(),
+                    duration_secs: 60,
+                    reason: None,
+                },
+                t0 + Duration::from_secs(10),
+                wall,
+                &mut h,
+            )
+            .await;
+        assert_eq!(sched.silences["c1"].until, t0 + Duration::from_secs(70));
+        assert!(
+            sched.silences["c1"].reason.is_none(),
+            "覆盖后 reason 一并替换"
+        );
+        assert!(
+            !sched.silences["c1"].suppressed_notice,
+            "覆盖 = 新静默期，抑制可见性边沿复位"
+        );
+
+        // 解除
+        sched
+            .handle_control(
+                ControlCommand::Unsilence {
+                    target: "c1".into(),
+                },
+                t0 + Duration::from_secs(20),
+                wall,
+                &mut h,
+            )
+            .await;
+        assert!(sched.silences.is_empty(), "unsilence 移除条目");
+
+        // 无活动静默的解除 → WARN 审计，无副作用
+        sched
+            .handle_control(
+                ControlCommand::Unsilence {
+                    target: "c1".into(),
+                },
+                t0 + Duration::from_secs(30),
+                wall,
+                &mut h,
+            )
+            .await;
+        assert!(sched.silences.is_empty());
+
+        let evs = drain_journal(&mut journal_rx);
+        let msgs = audit_messages(&evs);
+        assert!(
+            msgs.iter()
+                .filter(|m| m.starts_with("silence set for c1"))
+                .count()
+                == 2,
+            "建立与覆盖各写一条建立审计，got {msgs:?}"
+        );
+        assert!(
+            msgs.iter().any(|m| m.starts_with("silence set for c1")
+                && m.contains("3600s")
+                && m.contains("monotonic")
+                && m.contains("auto-expires")),
+            "审计含时长与到期语义 (单调 deadline 自动过期),got {msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.starts_with("silence set for c1") && m.contains("reason: deploy")),
+            "审计携带 reason"
+        );
+        assert!(
+            msgs.iter().any(|m| m.starts_with("silence removed for c1")),
+            "解除审计，got {msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.starts_with("unsilence request: no active silence for c1")),
+            "无活动静默的解除也要审计，got {msgs:?}"
+        );
+    }
+
+    /// duration=0 / 超 7d (604800) / 未知 target → 拒绝：不入表 + WARN 审计
+    /// (端点已 202 入队，eval 侧拒绝 —— 与 restart/check 模式一致)。
+    #[tokio::test]
+    async fn silence_rejects_invalid_duration_and_unknown_target() {
+        let cfg = silence_test_cfg();
+        let (mut h, mut journal_rx, _sr, _mr) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+        let t0 = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
+
+        for dur in [0u64, 604_801] {
+            sched
+                .handle_control(
+                    ControlCommand::Silence {
+                        target: "c1".into(),
+                        duration_secs: dur,
+                        reason: None,
+                    },
+                    t0,
+                    wall,
+                    &mut h,
+                )
+                .await;
+        }
+        // 未知 target (合法时长)
+        sched
+            .handle_control(
+                ControlCommand::Silence {
+                    target: "ghost".into(),
+                    duration_secs: 60,
+                    reason: None,
+                },
+                t0,
+                wall,
+                &mut h,
+            )
+            .await;
+        assert!(sched.silences.is_empty(), "全部拒绝：不得入表");
+
+        let evs = drain_journal(&mut journal_rx);
+        let msgs = audit_messages(&evs);
+        assert!(
+            msgs.iter().any(|m| m.contains("duration 0s out of range")),
+            "duration=0 拒绝审计，got {msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("duration 604801s out of range")),
+            "超 7d 拒绝审计，got {msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.starts_with("silence rejected: ghost is not a known target")),
+            "未知 target 拒绝审计，got {msgs:?}"
+        );
+    }
+
+    /// 通知抑制:Alert/Escalate/Flap 静默期不入 AlertQueue;Resolve 永不静默
+    /// (穿透);同一静默期首次抑制写一条可见性 Audit，期内不逐条重复;
+    /// 窗口过期后 (until <= now) 通知放行。
+    #[tokio::test]
+    async fn silence_suppresses_alert_and_flap_but_resolve_penetrates() {
+        let cfg = silence_test_cfg();
+        let (mut h, mut journal_rx, _sr, _mr) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+        let t0 = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(900);
+
+        sched
+            .handle_control(
+                ControlCommand::Silence {
+                    target: "c1".into(),
+                    duration_secs: 600,
+                    reason: Some("deploy".into()),
+                },
+                t0,
+                wall,
+                &mut h,
+            )
+            .await;
+        let _ = drain_journal(&mut journal_rx); // 清掉建立审计，隔离抑制可见性断言
+
+        // Alert 被抑制：不入队
+        let ev = silence_alert_event("c1", Category::Alert);
+        sched.emit_alert(&ev, t0, wall, &h);
+        assert!(h.alert.is_empty(), "静默期 Alert 不入 AlertQueue");
+
+        // Flap 同样被抑制
+        sched.emit_alert(&silence_alert_event("c1", Category::Flap), t0, wall, &h);
+        assert!(h.alert.is_empty(), "静默期 Flap 不入 AlertQueue");
+
+        // Resolve 永不静默：穿透入队
+        sched.emit_alert(&silence_alert_event("c1", Category::Resolve), t0, wall, &h);
+        assert_eq!(h.alert.len(), 1, "Resolve 必须穿透静默");
+        let popped = pop_alert(&h.alert).await;
+        assert_eq!(popped.category, Category::Resolve);
+
+        // 抑制可见性：期内恰好一条 (第二次抑制不重复)
+        sched.emit_alert(&silence_alert_event("c1", Category::Escalate), t0, wall, &h);
+        assert!(h.alert.is_empty(), "Escalate 同样被抑制");
+        let evs = drain_journal(&mut journal_rx);
+        let msgs = audit_messages(&evs);
+        let silenced: Vec<&&str> = msgs
+            .iter()
+            .filter(|m| m.starts_with("notifications silenced for target c1"))
+            .collect();
+        assert_eq!(
+            silenced.len(),
+            1,
+            "同一静默期只写一条抑制可见性审计 (防刷屏),got {msgs:?}"
+        );
+        assert!(
+            silenced[0].contains("reason: deploy"),
+            "抑制可见性审计携带静默 reason"
+        );
+
+        // 窗口过期 (until <= now，残留待 tick 清理) → 放行
+        let after = t0 + Duration::from_secs(601);
+        sched.emit_alert(&silence_alert_event("c1", Category::Alert), after, wall, &h);
+        assert_eq!(h.alert.len(), 1, "过期后通知放行 (monotonic deadline)");
+    }
+
+    /// P1(第十轮验证):Fatal 的合成 incident (check = RECOVER_CHECK) 与 Resolve
+    /// 同等豁免 —— 它无 tracker trail/renotify 兜底，被静默吞掉后永不补发。
+    #[tokio::test]
+    async fn silence_does_not_swallow_fatal_synthetic_alert() {
+        let cfg = silence_test_cfg();
+        let (mut h, _journal_rx, _sr, _mr) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+        let t0 = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(900);
+
+        sched
+            .handle_control(
+                ControlCommand::Silence {
+                    target: "c1".into(),
+                    duration_secs: 600,
+                    reason: None,
+                },
+                t0,
+                wall,
+                &mut h,
+            )
+            .await;
+
+        let fatal_ev = AlertEvent {
+            incident: AlertEvent::incident_key("c1", RECOVER_CHECK),
+            category: Category::Alert,
+            severity: Severity::Critical,
+            target: "c1".into(),
+            check: RECOVER_CHECK.to_string(),
+            reason: "target c1 latched fatal (restart budget exhausted)".into(),
+            observed: None,
+            first_seen: wall,
+            last_seen: wall,
+            occurrences: 1,
+        };
+        sched.emit_alert(&fatal_ev, t0, wall, &h);
+        assert_eq!(
+            h.alert.len(),
+            1,
+            "Fatal 合成告警必须穿透静默 (无补发路径，吞掉即永久丢失)"
+        );
+        let popped = pop_alert(&h.alert).await;
+        assert_eq!(popped.check, RECOVER_CHECK);
+    }
+
+    /// 到期惰性清理:expire_silences 对过期条目移除并各写恰好一条
+    /// 「silence expired for target X」审计;未到期不动;重复调用无副作用。
+    #[tokio::test]
+    async fn silence_expiry_writes_single_audit_edge() {
+        let cfg = silence_test_cfg();
+        let (mut h, mut journal_rx, _sr, _mr) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+        let t0 = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
+
+        sched
+            .handle_control(
+                ControlCommand::Silence {
+                    target: "c1".into(),
+                    duration_secs: 60,
+                    reason: None,
+                },
+                t0,
+                wall,
+                &mut h,
+            )
+            .await;
+
+        // 未到期：无清理、无到期审计
+        sched.expire_silences(t0 + Duration::from_secs(59), wall, &h);
+        assert!(sched.silences.contains_key("c1"), "未到期不得清理");
+        assert!(
+            audit_messages(&drain_journal(&mut journal_rx))
+                .iter()
+                .all(|m| !m.starts_with("silence expired for target c1")),
+            "未到期不写到期审计"
+        );
+
+        // 到期 (until <= now):移除 + 恰好一条到期审计
+        sched.expire_silences(t0 + Duration::from_secs(60), wall, &h);
+        assert!(sched.silences.is_empty(), "过期条目不得残留");
+        let evs = drain_journal(&mut journal_rx);
+        let msgs = audit_messages(&evs);
+        assert_eq!(
+            msgs.iter()
+                .filter(|m| m.starts_with("silence expired for target c1"))
+                .count(),
+            1,
+            "到期写恰好一条审计，got {msgs:?}"
+        );
+
+        // 重复调用：条目已移除，无副作用
+        sched.expire_silences(t0 + Duration::from_secs(120), wall, &h);
+        assert!(
+            audit_messages(&drain_journal(&mut journal_rx))
+                .iter()
+                .all(|m| !m.starts_with("silence expired for target c1")),
+            "过期审计是边沿，不重复"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // F31 定期维护窗口 (抑制叠加 / Resolve+Fatal 穿透 / 开关 Audit 边沿)
+    // -----------------------------------------------------------------
+
+    /// 带维护窗口的测试配置:`spec` 为 `[[maintenance]]` 条目的 TOML 正文。
+    fn maintenance_test_cfg(spec: &str) -> Config {
+        Config::from_toml_str(&format!(
+            r#"
+            [[check]]
+            name = "c1"
+            kind = "tcp"
+            addr = "127.0.0.1:59999"
+            interval = "10s"
+            timeout = "5s"
+
+            [[maintenance]]
+            {spec}
+            "#
+        ))
+        .unwrap()
+    }
+
+    /// 通知抑制 (ROADMAP F31 验收「单测」):窗口内 Alert/Escalate/Flap 不入
+    /// AlertQueue 且抑制命中**不逐条写 journal** (窗口开启 Audit 即可见性
+    /// 边沿);Resolve 与 Fatal 合成告警 (check = RECOVER_CHECK) 恒穿透 ——
+    /// 豁免对维护窗口与静默同等生效。
+    #[tokio::test]
+    async fn maintenance_window_suppresses_alert_but_resolve_and_fatal_penetrate() {
+        // start 00:00 + 48h:对任意真实 UTC 时刻恒在窗口内 (开启日每天命中，
+        // 任一时刻距最近一次 00:00 开启 ≤ 24h < 48h)。
+        let cfg = maintenance_test_cfg(
+            "name = \"always\"\ntargets = [\"*\"]\nstart_utc = \"00:00\"\nduration = \"48h\"",
+        );
+        assert_eq!(cfg.maintenance.len(), 1, "测试配置自带一条窗口");
+        let (h, mut journal_rx, _sr, _mr) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+        assert_eq!(sched.maintenance.len(), 1);
+        let t0 = Instant::now();
+        let wall = SystemTime::now();
+
+        // Alert / Escalate / Flap 全部被抑制
+        for cat in [Category::Alert, Category::Escalate, Category::Flap] {
+            sched.emit_alert(&silence_alert_event("c1", cat), t0, wall, &h);
+            assert!(h.alert.is_empty(), "{cat:?} 必须被维护窗口抑制");
+        }
+        // 抑制命中不写 journal (防刷屏：窗口开启 Audit 才是边沿)
+        assert!(
+            drain_journal(&mut journal_rx).is_empty(),
+            "抑制命中不逐条写审计"
+        );
+
+        // Resolve 永不抑制：穿透入队
+        sched.emit_alert(&silence_alert_event("c1", Category::Resolve), t0, wall, &h);
+        let popped = pop_alert(&h.alert).await;
+        assert_eq!(
+            popped.category,
+            Category::Resolve,
+            "Resolve 必须穿透维护窗口"
+        );
+
+        // Fatal 合成告警 (check = RECOVER_CHECK) 同等豁免
+        let fatal_ev = AlertEvent {
+            incident: AlertEvent::incident_key("c1", RECOVER_CHECK),
+            category: Category::Alert,
+            severity: Severity::Critical,
+            target: "c1".into(),
+            check: RECOVER_CHECK.to_string(),
+            reason: "target c1 latched fatal (restart budget exhausted)".into(),
+            observed: None,
+            first_seen: wall,
+            last_seen: wall,
+            occurrences: 1,
+        };
+        sched.emit_alert(&fatal_ev, t0, wall, &h);
+        let popped = pop_alert(&h.alert).await;
+        assert_eq!(
+            popped.check, RECOVER_CHECK,
+            "Fatal 合成告警必须穿透维护窗口"
+        );
+    }
+
+    /// target 匹配门控：窗口 targets 前缀匹配同 `[[alert.routes]]` ——
+    /// 非命中 target 的通知不受抑制。
+    #[tokio::test]
+    async fn maintenance_window_suppression_respects_target_match() {
+        let cfg = maintenance_test_cfg(
+            "name = \"edge\"\ntargets = [\"api\"]\nstart_utc = \"00:00\"\nduration = \"48h\"",
+        );
+        let (h, _journal_rx, _sr, _mr) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+        let t0 = Instant::now();
+        let wall = SystemTime::now();
+
+        // 非命中 target:正常入队
+        sched.emit_alert(&silence_alert_event("c1", Category::Alert), t0, wall, &h);
+        let popped = pop_alert(&h.alert).await;
+        assert_eq!(popped.target, "c1", "未命中窗口 target 的通知不受抑制");
+
+        // 前缀命中的 target (api-x):被抑制
+        sched.emit_alert(&silence_alert_event("api-x", Category::Alert), t0, wall, &h);
+        assert!(h.alert.is_empty(), "前缀匹配 target 被抑制");
+    }
+
+    /// 开/关 Audit 边沿 (ROADMAP F31 验收):首次进入窗口写一条 opened,
+    /// 重复检查不重写;离开窗口写恰好一条 closed，之后再无新增。时间全部
+    /// 注入 (真实「今天」的 00:00:30 / 00:01:30，窗口 00:00+60s)。
+    #[tokio::test]
+    async fn maintenance_edges_write_open_and_close_audits_once() {
+        let cfg = maintenance_test_cfg(
+            "name = \"nightly\"\ntargets = [\"*\"]\nstart_utc = \"00:00\"\nduration = \"60s\"",
+        );
+        let (h, mut journal_rx, _sr, _mr) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+        let day = epoch_secs(SystemTime::now()) / 86_400;
+        let wall_in = SystemTime::UNIX_EPOCH + Duration::from_secs(day * 86_400 + 30);
+        let wall_out = SystemTime::UNIX_EPOCH + Duration::from_secs(day * 86_400 + 90);
+
+        // 进入窗口 → 恰好一条 opened (有 name 报 name)
+        sched.update_maintenance_edges(wall_in, &h);
+        let open_evs = drain_journal(&mut journal_rx);
+        let msgs = audit_messages(&open_evs);
+        assert_eq!(
+            msgs.iter()
+                .filter(|m| m.contains("maintenance window opened"))
+                .count(),
+            1,
+            "首轮进入窗口写一条 opened,got {msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("maintenance window opened: nightly") && m.contains("UTC")),
+            "opened 审计含窗口名与 UTC 语义，got {msgs:?}"
+        );
+
+        // 同一窗口内重复检查：无新边沿
+        sched.update_maintenance_edges(wall_in, &h);
+        assert!(
+            drain_journal(&mut journal_rx).is_empty(),
+            "窗口内重复检查无审计"
+        );
+
+        // 离开窗口 (60s 后) → 恰好一条 closed
+        sched.update_maintenance_edges(wall_out, &h);
+        let closed_evs = drain_journal(&mut journal_rx);
+        let msgs = audit_messages(&closed_evs);
+        assert_eq!(
+            msgs.iter()
+                .filter(|m| m.contains("maintenance window closed"))
+                .count(),
+            1,
+            "离开窗口写恰好一条 closed,got {msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("maintenance window closed: nightly")),
+            "closed 审计含窗口名，got {msgs:?}"
+        );
+
+        // 窗口外重复检查：无新边沿
+        sched.update_maintenance_edges(wall_out, &h);
+        assert!(
+            drain_journal(&mut journal_rx).is_empty(),
+            "窗口外重复检查无审计"
+        );
     }
 
     /// 参数变更 (interval):保留状态机水位 (级别 + 连续计数 + 调度时刻),
@@ -3604,6 +4873,46 @@ mod tests {
         );
         assert_eq!(sched.checks[0].next_due, due_before, "调度水位保留");
         assert_eq!(sched.active_cfg.checks[0].interval, Duration::from_secs(99));
+    }
+
+    /// F33:reload 成功后 config_view watch 刷新 —— /v1/config 反映新拓扑
+    /// (第十轮偏差修复：快照不再滞留启动值)。
+    #[tokio::test]
+    async fn reload_refreshes_config_view_watch() {
+        let cfg = reload_test_cfg();
+        let (mut h, _jr, _status_rx, _metrics_rx) = reload_handles();
+        let rx = h.config_view_tx.subscribe();
+        let mut sched = Scheduler::build(&cfg);
+
+        let mut new_cfg = reload_test_cfg();
+        new_cfg.checks[0].interval = Duration::from_secs(99);
+        sched
+            .apply_reload(new_cfg, &mut h, Instant::now(), SystemTime::now())
+            .await
+            .expect("reload must succeed");
+
+        let view = Arc::unwrap_or_clone(rx.borrow().clone());
+        assert_eq!(
+            view["check"].as_array().map(|a| a.len()),
+            Some(1),
+            "reload 后视图携带新 cfg 的 check 数组"
+        );
+        // P3(第十一轮验证强化):测试配置带 token/secret —— 视图必须为占位符，
+        // 且明文不出现在任何字段。
+        assert_eq!(view["alert"]["webhook_secret"], "***redacted***");
+        assert_eq!(view["control"]["token"], "***redacted***");
+        assert!(
+            !view.to_string().contains("sec-startup"),
+            "明文签名密钥不得出现在视图"
+        );
+        assert!(
+            !view.to_string().contains("tok-startup"),
+            "明文令牌不得出现在视图"
+        );
+        assert!(
+            view.to_string().contains("99"),
+            "interval 已随 reload 更新 (dur 序列化),got {view}"
+        );
     }
 
     /// 增删：新增 check/service/watch 生效，删除条目移除并写审计;

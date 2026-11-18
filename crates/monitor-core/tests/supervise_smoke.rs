@@ -112,6 +112,8 @@ async fn spawn_agent(services: Vec<ServiceCfg>) -> Harness {
     for s in &cfg.services {
         pm.register(s.clone());
     }
+    let (config_view_tx, _config_view_rx) =
+        tokio::sync::watch::channel(Arc::new(serde_json::Value::Null));
     let handles = SchedulerHandles {
         snapshot_rx: snap_rx,
         alert: queue,
@@ -123,6 +125,7 @@ async fn spawn_agent(services: Vec<ServiceCfg>) -> Harness {
         pm,
         replayed: JournalState::default(),
         config_path: Default::default(),
+        config_view_tx,
     };
     let task = tokio::spawn(async move {
         let _ = monitor_core::eval::run(cfg, handles).await;

@@ -138,14 +138,24 @@ pub(crate) fn diff_topology(old: &Config, new: &Config) -> TopologyDiff {
 }
 
 /// 非拓扑小节变更检测 (纯函数):返回变更的小节名 (固定顺序 agent → log →
-/// control → collect → alert → metrics)。这些段**要求重启**,不热应用。
+/// control → collect → alert → metrics → maintenance)。这些段**要求重启**,
+/// 不热应用。maintenance 必须列入 (P1 第十一轮验证：漏列会使窗口变更 reload
+/// 零审计，运维无从得知新窗口未生效)。
 pub(crate) fn diff_sections(old: &Config, new: &Config) -> Vec<&'static str> {
     let (o, n) = (json_of(old), json_of(new));
     let get = |v: &serde_json::Value, key: &str| v.get(key).cloned().unwrap_or_default();
-    ["agent", "log", "control", "collect", "alert", "metrics"]
-        .into_iter()
-        .filter(|section| get(&o, section) != get(&n, section))
-        .collect()
+    [
+        "agent",
+        "log",
+        "control",
+        "collect",
+        "alert",
+        "metrics",
+        "maintenance",
+    ]
+    .into_iter()
+    .filter(|section| get(&o, section) != get(&n, section))
+    .collect()
 }
 
 /// 防御性断言：三空间 name 唯一 (校验层 `Config::validate` 已保证;仅在绕过
@@ -484,6 +494,11 @@ mod tests {
             [alert]
             failure_threshold = 5
 
+            [[maintenance]]
+            targets = ["*"]
+            start_utc = "02:00"
+            duration = "30m"
+
             [[check]]
             name = "c1"
             kind = "tcp"
@@ -505,8 +520,30 @@ mod tests {
         "#);
         assert_eq!(
             diff_sections(&a, &sections_changed),
-            ["agent", "collect", "alert"]
+            ["agent", "collect", "alert", "maintenance"],
         );
+    }
+
+    /// P1(第十一轮验证):maintenance 段变更必须被检出 (漏列 = reload 零审计，
+    /// 新窗口看似生效实则未应用)。
+    #[test]
+    fn diff_sections_flags_maintenance_changes() {
+        let a = cfg(r#"
+            [[maintenance]]
+            targets = ["*"]
+            start_utc = "02:00"
+            duration = "30m"
+        "#);
+        let b = cfg(r#"
+            [[maintenance]]
+            targets = ["edge"]
+            start_utc = "03:00"
+            duration = "1h"
+        "#);
+        assert_eq!(diff_sections(&a, &b), ["maintenance"]);
+        // 无 maintenance 段 ↔ 空表：同属变更 (新增/清空窗口都要审计)
+        let none = cfg("");
+        assert_eq!(diff_sections(&none, &a), ["maintenance"]);
     }
 
     /// 防御性断言：绕过校验构造的重名 Config 被点名 (check / service 空间独立)。

@@ -28,7 +28,10 @@
 ### 1.1 monitorctl 命令语义
 
 `monitorctl` 是控制平面的薄 HTTP 客户端 (DESIGN §9.2)。全局参数
-`--url <URL>`(默认 `http://127.0.0.1:9170`),子命令：
+`--url <URL>`(默认 `http://127.0.0.1:9170`) 与 `--token <TOKEN>`
+(F23:agent 配置了 `[control] token` 时携带 `Authorization: Bearer <token>`;
+flag 优先于 `SERVICE_WATCH_TOKEN` 环境变量;未配置 token 的 agent 忽略该头),
+与 `--insecure`(F32:跳过 TLS 证书校验，详见 §1.2d),子命令：
 
 | 子命令 | HTTP | 语义 | 典型输出/退出码 |
 |---|---|---|---|
@@ -36,7 +39,11 @@
 | `restart <target>` | `POST /v1/restart/{target}` | 手动重启 supervise 目标 | `accepted (202)` = 已入队;**Fatal 态被拒** |
 | `check <target>` | `POST /v1/check/{target}` | 绑定检查立即到期 (下一轮调度立即执行) | `accepted (202)`;用于改配置/修复后的即时验证 |
 | `reset <target>` | `POST /v1/reset/{target}` | 解除 Fatal 闩锁 + 清空重启预算 (写审计) | `accepted (202)`;journal 增 `reset` 事件 |
+| `silence <target> --duration <s> [--reason <t>]` | `POST /v1/silence/{target}` | 静默该 target 通知 (F27):窗口内 Alert/Escalate/Flap 不投递，Resolve 穿透 | `accepted (202)`;拒绝 (时长 0/超 7d、未知 target) 经 journal 审计 |
+| `unsilence <target>` | `DELETE /v1/silence/{target}` | 提前解除静默 (F27) | `accepted (202)`;journal 审计 |
+| `journal [--tail n] [--target <n>] [--type <t>] [--since <s>] [--json]` | `GET /v1/journal` | journal 尾部查询 (F28;含上一代 journal.1.jsonl,F35;`--json` 原始 JSON Lines) | 表格或 JSON Lines;`truncated` 时 stderr 提示;失败 2/4 |
 | `metrics [--prom]` | `GET /metrics` | 运行指标 (JSON 默认;`--prom` 走 `?format=prometheus`) | 文本/JSON;失败 2/4 |
+| `config [--json]` | `GET /v1/config` | 生效配置查看 (F33):顶层段键值 + maintenance/routes 列表逐行;`--json` 原样 | 表格/原样 JSON;`***redacted***` = agent 脱敏占位 (不可回灌);失败 2/4 |
 | `dump-snapshot [--config <path>]` | (本地) | 单次采集 JSON,**不经 agent**,用于验证采集层 | 退出码 0/1(配置)/2(采集失败) |
 
 monitorctl 退出码 (DESIGN §9.3):`0` 成功;`2` 运行错误 (非 2xx 响应，含 409);
@@ -73,11 +80,142 @@ enabled = true
 url = "http://collector:9090/ingest"    # POST MetricsReport JSON
 interval = "60s"                        # timeout < interval(校验强制)
 timeout = "10s"
+# secret = "change-me"                  # 可选 HMAC 签名密钥 (F34);缺省 (不写) = 不签名
 ```
 
 语义：单次尝试、失败即放弃 (下一周期自然是最新值，at-least-once 无意义);
 连败 1 次 / 达到 3 次 / 每 10 连败写 journal 审计 (粘性边沿，不刷屏),恢复首轮亦审计。
+`secret` 配置后每次推送附 `X-Service-Watch-Signature: sha256=<hex>` 头，签名对象
+= 实际发送的 body 字节 (与 webhook 签名同款口径，验签方法见 §3.4);密钥不落日志。
 抓取器更推荐拉模式：`GET /metrics?format=prometheus`。
+
+## 1.2d 控制面 HTTPS (F32)
+
+`[control]` 配 `tls_cert` + `tls_key`(PEM 路径，**成对必填**,单边配置被拒绝)
+后，控制面以纯 HTTPS 监听同一 `listen` 地址;未配置 = 纯 HTTP(行为不变)。
+语义细则见 DESIGN §9.2.2。
+
+```toml
+[control]
+listen = "127.0.0.1:9170"
+tls_cert = "/etc/service-watch/tls/cert.pem"   # 证书链 PEM(leaf 证书在前，后跟中间链 —— 顺序写反启动即失败)
+tls_key = "/etc/service-watch/tls/key.pem"     # 私钥 PEM(权限 0600，勿入库;PKCS8/SEC1 均支持)
+```
+
+自签证书生成示例 (openssl;测试场景也可用 rcgen，见 tests/tls_control.rs):
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout key.pem -out cert.pem -days 365 \
+  -subj "/CN=service-watch" -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
+```
+
+- **证书校验**:`monitorctl --url https://127.0.0.1:9170` 走 reqwest rustls,
+  校验系统信任链 —— **自签/私有 CA 需先把 CA 装入系统信任存储**
+  (macOS `security add-trusted-cert`,Linux 更新 ca-certificates,Windows
+  certutil -addstore),或临时加 `--insecure` 跳过校验。
+- **`--insecure` 警示**:关闭证书校验意味着中间人不可检测 —— **仅自签/
+  测试场景**使用;生产部署应安装 CA 进信任链，不要在脚本里固化 `--insecure`。
+- **明文请求**:TLS 模式下明文 HTTP 打同端口只会得到 TLS alert(连接错误),
+  无降级 —— 监控探活脚本请同步改用 `https://`。
+- **轮换 = 重启**:证书加载后驻留内存;更换证书后重启 agent 生效 (control
+  段不走热重载),失败路径 (坏 PEM/缺失文件)在启动装配期即退出码 2。
+- **私钥纪律**:私钥内容不进日志/错误 (错误仅含路径与解析原因);文件权限
+  建议 0600，不要与 agent 同用户之外的可读面共享。
+
+### 1.2e 控制面 mTLS (F38,可选客户端证书)
+
+远程运维场景在 HTTPS 之上再加一层客户端证书校验:agent 配置
+`[control] client_ca_cert` 后,TLS 握手要求客户端证书由该 CA 签发 ——
+无证书/不可信证书的客户端直接被握手层拒绝 (连接错误,无 HTTP 交互)。
+**必须与 tls_cert/tls_key 同配**(校验层拒绝单配);未配置 = 行为与 §1.2d
+完全一致。
+
+```toml
+[control]
+listen = "127.0.0.1:9170"
+tls_cert = "/etc/service-watch/tls/cert.pem"
+tls_key = "/etc/service-watch/tls/key.pem"
+client_ca_cert = "/etc/service-watch/tls/client-ca.pem"  # 校验客户端证书的 CA(可含多段证书)
+```
+
+自签 CA + 客户端证书生成示例 (openssl;CA 可与 §1.2d 服务端证书同一套,
+也可独立 —— 独立 CA 更利于区分「服务端加密」与「客户端准入」两类信任):
+
+```bash
+# 1) 客户端准入 CA(自签根)
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout client-ca-key.pem -out client-ca.pem -days 365 \
+  -subj "/CN=service-watch client ca"
+
+# 2) 客户端证书(由该 CA 签发;SAN 对服务端校验无意义,留空也可)
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout client-key.pem -out client.csr -subj "/CN=monitorctl"
+openssl x509 -req -in client.csr -CA client-ca.pem -CAkey client-ca-key.pem \
+  -CAcreateserial -out client-cert.pem -days 90
+chmod 0600 client-ca-key.pem client-key.pem
+```
+
+- **monitorctl 用法**:全局 `--client-cert <PATH>` + `--client-key <PATH>`
+  **成对必填**(单边 → 启动错误,退出码 2),全部子命令共用:
+
+  ```bash
+  monitorctl --url https://127.0.0.1:9170 \
+    --client-cert client-cert.pem --client-key client-key.pem \
+    --token "$SERVICE_WATCH_TOKEN" status
+  ```
+
+- **信任链三件套可叠加**:TLS(§1.2d)+ Bearer token(F23,`--token`) +
+  mTLS(F38,`--client-cert/--client-key`)独立配置、独立生效 —— 同时配置
+  互不排斥;`--insecure` 只跳过**服务端证书校验**,不影响客户端证书要求
+  (服务端仍会要求证书,mTLS 场景下 `--insecure` 不能替代证书)。
+- **加载失败早退**:CA 文件缺失/坏 PEM/无证书段 → 启动装配期退出码 2(与
+  服务端证书同列);CA 解析为严格模式,任一段失败即拒绝,不做宽容收集。
+- **轮换 = 重启**:CA 与证书同列加载驻留内存;增删客户端信任、换 CA、
+  换客户端证书后重启 agent 生效(control 段不走热重载)。
+- **证书有效期**:客户端证书过期后握手即失败,表现为 monitorctl 退出 4
+  (agent unreachable,连接错误) —— 排查时先查 `openssl x509 -enddate`。
+
+### 1.2f 指标历史持久化 ([metrics] history_path,F39)
+
+```toml
+[metrics]
+# history_path = "./data/metrics-history.jsonl"  # 可选;缺省 (不写) = 仅内存环形缓冲 (现状)
+```
+
+配置后 eval 每轮发布的样本以 JSONL **追加**落盘,一行 =
+`GET /metrics/history` 单样本对象 `{"at": ..., "report": {...}}`(at 为
+writer 落盘时刻,report 与该端点样本同构) —— 纯观测数据出口,不做重放/
+查询,分析直接走 jq:
+
+```bash
+# 逐样本看探测执行数 (与 /metrics/history 相同的行语义)
+jq -c '.report | {probe_executed, alerts_dropped, recovery_fatal}' \
+  ./data/metrics-history.jsonl | tail -20
+# 挑出发生过 Fatal 的时刻
+jq -c 'select(.report.recovery_fatal > 0)' ./data/metrics-history.jsonl
+```
+
+语义细则 (DESIGN §10):
+
+- **消费模型**:独立 writer 任务消费 metrics watch,不阻塞 eval;watch 滞后
+  时中间样本被最新值覆盖 (极端滞后跳轮,落盘为最新值);启动首行 = watch
+  当前值 (可能是全零默认报告,首样本照写不去重)。
+- **重启追加不截断**:文件以 append 模式打开,agent 重启后继续追加,历史
+  跨重启连续 —— 不要把 history_path 指向会被启动脚本清空的路径。
+- **内置轮转 (单代)**:写后实测尺寸超 **10 MiB** → 当前文件改名
+  `metrics-history.1.jsonl`(只保留一代,二次轮转覆盖)并从零续写,轮转写
+  一条 `tracing::info`(**不写 journal audit** —— 历史文件是观测出口,不是
+  恢复域)。轮转失败 WARN 后继续写当前文件,超限增长直至运维介入。
+- **外部轮转工具口径 (与 §6.3 journal 配方的差异)**:copytruncate(清零
+  原文件)兼容 —— O_APPEND 写者 + 写后实测尺寸判断,清零后不会误轮转;
+  **rename 式**外部轮转 (newsyslog 默认) 无效 —— writer 持 fd 续写旧
+  inode,原路径不出现新文件;外部工具**不得删除/改名 history 主文件本身**
+  (writer 句柄长持)。两者叠加时把 `.1` 一并纳入归档脚本。
+- **可靠性口径**:无逐行 fsync(崩溃丢尾部可容忍);进程崩溃恰逢写入中途
+  可留下残行(概率极低)—— 分析用 `jq -c 'fromjson? // empty'` 容忍。
+  历史文件打不开 (权限/坏路径) → ERROR 后该功能本次运行停用,agent 照常
+  启动 (观测出口不挡恢复域)。
 
 ## 1.3 Fatal 闩锁处置流程
 
@@ -140,11 +278,87 @@ sudo systemctl restart service-watch
 # macOS 使用 launchctl，Windows 使用 Restart-Service
 ```
 
+### 1.5 目标级静默 (F27:部署/维护窗口降噪)
+
+`monitorctl silence` 在**通知管道侧**压制指定 target 的 Alert/Escalate/Flap 通知
+(恢复通知 Resolve **永不静默**;事件与恢复行为完全不变 —— journal Incident 照常写，
+检查状态机/恢复 FSM/预算/Fatal 全部照常运转)。典型场景：计划内部署会触发真实
+Critical(端口切换、进程重启),提前静默避免误传呼：
+
+```bash
+# 部署前:静默 30 分钟(1800s),带审计原因
+monitorctl silence my-app --duration 1800 --reason "planned deploy v2.3.0"
+
+# 部署完成,提前解除(写审计,剩余窗口作废)
+monitorctl unsilence my-app
+
+# 查询静默审计(Audit 事件**无 target 字段**,不要加 --target):
+monitorctl journal --type audit --tail 20
+# 查询被静默期间 my-app 的事件(Incident/Restart 等带 target 字段):
+monitorctl journal --target my-app --since $(date -u +%s --date='-40 min') --json | jq .
+```
+
+语义与注意 (DESIGN §7.3):
+
+- **到期自动解除**(单调时钟 deadline，与墙钟回拨无关):到点写一条
+  `audit`(`"silence expired for target X"`),无需人工清理;**agent 重启后静默
+  不保留**(内存态，不入 journal 重放 —— 重启即失忆，宁可多响不可漏报)。
+- 重复 `silence` 同一 target = **后到覆盖**(窗口从新命令时刻重算)。
+- `--duration 0` 或超 7 天 (604800s)、以及 target 名不存在 → CLI 仍显示
+  `accepted (202)`(与 restart/check 的入队语义一致),实际拒绝看 journal 审计
+  (`silence rejected for …`)。
+- 静默期内首次抑制命中写一条 `audit`(`"notifications silenced for target X
+  until …"`),期内不逐条记录 (防刷屏);journal 里 Incident 事件照常可见 ——
+  事后查证不受静默影响。
+- **Fatal 闩锁告警不被静默**(与 Resolve 同等豁免):它无检查类 incident 的
+  renotify 兜底，被吞即永久丢失;部署窗口 crash loop → Fatal 恰是最需要
+  穿透的信号。
+- 解除静默后，进行中 incident 的下一通知最多延迟一个 `renotify_interval`
+  (默认 15m);静默期内打开并恢复的 incident 会有一条此前没有对应 Alert 的
+  Resolve(Alert 被吞而 Resolve 穿透)—— 按"恢复即真相"处理。
+
+### 1.6 定期维护窗口 (F31:固定时段降噪)
+
+`[[maintenance]]` 把**按 UTC 时钟周期性开合**的抑制窗口写进配置 (与 §1.5 的
+手动 silence 互补:silence 是一次性事件，维护窗口每天/每周自动重入，无需每次
+手动静默)。典型场景：每晚备份窗口、定期批处理时段 —— 期间已知会产生真实
+告警：
+
+```toml
+[[maintenance]]
+name = "nightly-backup"        # 可选;缺省 = 审计报 targets
+targets = ["db-*"]             # target 前缀或 ["*"] = 全部 (同 alert.routes)
+start_utc = "18:30"            # UTC "HH:MM"(把本地时刻换算成 UTC 后填写)
+duration = "30m"               # ≥ 60s;可跨午夜
+days = ["mon", "wed", "fri"]   # 可选;缺省 = 每天 (mon..sun)
+```
+
+语义与注意 (DESIGN §7.3):
+
+- **只抑制通知**:窗口内匹配 target 的 Alert/Escalate/Flap 不投递;
+  **Resolve 与 Fatal 闩锁告警恒穿透**(与 F27 同口径)。incident/恢复/预算
+  全部照常运转，journal Incident 事件可事后查证。
+- **全部按 UTC，不支持 DST**:std 无时区库，如实限定;夏令时切换期间窗口
+  相对本地钟平移 1h，语义仍是确定的。
+- **跨午夜窗口合法**:`start_utc = "23:00"` + `duration = "3h"` → 次日 02:00
+  结束;越界部分归属**开启日**(周一开的窗，周二凌晨也算"周一的窗口",
+  days 过滤无歧义)。
+- **审计边沿**:窗口开启/关闭各写一条 journal `audit`
+  (`maintenance window opened/closed: <name>`;无 name 报 targets)。抑制命中
+  本身不逐条记录 —— 开启审计即边沿，长窗口内不刷屏。agent **重启后窗口自动
+  重入**(按 UTC 时钟判定，无状态;与 silence 的"重启即失忆"不同);启动即
+  处于窗口内时首轮 tick 补一条 opened 审计。
+- 与 §1.5 的 silence **叠加**:任一命中即抑制 (无优先级),Audit 边沿各自
+  独立写。
+- `[[maintenance]]` **不在热重载范围**(§1.4):变更后重启 agent 生效。
+
 ## 2. journal.jsonl:结构与查询
 
 ### 2.1 事件 schema
 
 append-only JSONL，由独立阻塞写任务处理。Restart、Fatal、Reset、批量 ResetTargets 与进程身份事件等待 sync_data 确认，2 秒内未确认或写入失败会停止当前恢复实例并退出 2。普通 Incident/Audit 队列拥塞时计数丢弃。旧 journal 读取失败会拒绝启动，应保留原件并修复存储或损坏记录。
+
+**内置轮转 (F24)**:`agent.journal_max_size`(默认 10 MiB,`0` = 禁用) 超限时，agent 自行把当前 `journal.jsonl` 改名为 **`journal.1.jsonl`(上一代，只保留一代)** 并重建当前文件继续写，同时在新文件首行落一条 `audit`(`"journal rotated: …"`)。因此磁盘上至多两个 journal 文件;`journal.1.jsonl` 是**已完成的历史代**,可随时归档/压缩/删除，不影响运行中的 agent。重放按 `journal.1 → journal.jsonl` 顺序进行，Fatal 闩锁与未决 SpawnIntent 跨轮转保持。改名失败 (如目标被占用) 时 agent 保留当前文件继续写并记 WARN——不停机、不丢事件。
 
 ```jsonc
 // 1. incident:检查/告警状态机转移(含 flap 抑制摘要)
@@ -186,6 +400,19 @@ append-only JSONL，由独立阻塞写任务处理。Restart、Fatal、Reset、�
 ```
 
 ### 2.2 常用 jq 查询
+
+远程/免登录场景可先用内置尾部查询 (F28，经控制平面鉴权;**F35 起 `journal.1.jsonl`
+存在时一并尾读** —— gen1 尾部在前、当前文件尾部在后合并，`truncated` 按合并后
+总命中数与 tail 比较 + 任一文件字节截断;仍不含更早代 —— F24 只保留一代，更早
+历史已随轮转覆盖丢弃，全量深查仍走 jq):
+
+```bash
+monitorctl journal --tail 50                        # 最近 50 条,表格输出
+monitorctl journal --target my-app --type fatal --tail 20
+monitorctl journal --tail 100 --json | jq -c 'select(.severity=="critical")'
+```
+
+本机全量查询：
 
 ```bash
 J=/var/lib/service-watch/journal.jsonl
@@ -235,7 +462,8 @@ jq -c . "$J" > /dev/null || echo "存在坏行,见 deploy/README.md §5.3"
 ```
 
 注：`jq -s` 会整文件载入内存，常规事件量 (见 §6.2) 完全无压力;若 journal 已
-数百 MB，先轮转 (§6.3) 再分析。
+数百 MB，先轮转 (§6.3) 再分析。启用内置轮转 (F24) 后历史可能在
+`journal.1.jsonl` 中，完整时间线请把两个文件一起喂给 jq（按 mtime 顺序拼接）。
 
 ## 3. 告警语义与处置
 
@@ -260,6 +488,13 @@ jq -c . "$J" > /dev/null || echo "存在坏行,见 deploy/README.md §5.3"
 抑制只作用于通知，**journal 的 incident 事件照记不误**——"没收到通知但 journal
 有事件"先看本表，再看 §3.4 投递故障。
 
+**重启后的恢复重通知 (F25)**:agent 重启时，journal 里仍 open 的 incident
+(有 alert/escalate、无配对 resolve) 会恢复进引擎并各产出一条通知，
+`reason = "restored from journal: <原 reason>"`(类别仍为 `alert`)。这条通知
+就是新的 renotify 窗口起点：恢复后即使故障仍在，`renotify_interval` 内不会
+重复轰炸，但窗口滑过会按间隔重发。flap 计数器**不**跨重启恢复 (新会话
+fresh 窗口)。
+
 ### 3.3 Resolve 语义
 
 - `Resolve` 引用原 incident 且**总是发送**(前提：该 incident 曾发出过通知);
@@ -272,24 +507,83 @@ jq -c . "$J" > /dev/null || echo "存在坏行,见 deploy/README.md §5.3"
 - 每笔投递带 `alert.timeout`(默认 10s) 与 `retries` 次指数退避 (1s 起步 ×2,
   封顶 10s);最终失败记 ERROR + `alert_delivery_failures` 计数。
 - 有界队列 (256) 满 → **丢最旧 + WARN 审计** + `alerts_dropped` 计数 (告警时效
-  优先于完整性;投递失败事件的持久化补投已由 F12 落地:`{data_dir}/spool/pending.jsonl`,
-  恢复后重放,成功确认后删除,7 天过期)。观察到 dropped 增长 = 事件生产速率
+  优先于完整性;投递失败事件的持久化补投已由 F12 落地：`{data_dir}/spool/pending.jsonl`,
+  恢复后重放，成功确认后删除，7 天过期)。观察到 dropped 增长 = 事件生产速率
   超过投递能力，先解决 webhook 端点变慢，而不是调大队列。
+- **按目标路由 (F26)**:`[[alert.routes]]` 按配置顺序首条匹配 target 名称前缀
+  (`match = "edge"` 命中 `edge-*`;`match = "*"` 通配全部),未命中回落默认
+  `webhook_url`(routes 与默认并存，默认 = 兜底)。路由命中与否不影响超时/退避/
+  队列/spool 语义;**spool 积压重放按 agent 启动时的当前配置重新路由**——
+  改路由配置并重启后，旧积压会按新配置送达。`webhook_url` 为空且无匹配 =
+  事件不外投 (仍入 journal/日志)。
 - `deadman_url`(可选) 周期心跳 POST，失败仅记日志——"agent 活着但失聪 (webhook
   通道挂了)"由外部心跳监控兜底，生产建议配置。
 - `webhook_format=slack` 需要 Slack/Discord 兼容端点 (`{"text": ...}`);通用
   JSON 格式投递 AlertEvent 原样 (字段见 DESIGN §5)。
+- **签名验签示例 (F29)**:`[alert] webhook_secret`(或路由级 `secret`) 配置后，
+  每笔投递带 `X-Service-Watch-Signature: sha256=<hex hmac-sha256(body)>` 头
+  (HTTP/2 与严格接收端看到的线上头名为全小写 `x-service-watch-signature`,
+  RFC 9110 头名大小写不敏感;逐字节匹配的裸 socket 接收端请按小写处理),
+  签名对象就是收到的原始 body 字节。接收端用同一密钥重算比对：
+
+  ```bash
+  # openssl 一行验签 ($body = 收到的原始字节，$sig = 头里的 hex，去掉 "sha256=" 前缀)
+  printf '%s' "$body" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}' | grep -qx "$sig"
+  ```
+
+  ```python
+  # python (hmac.verify 内部为恒定时间比较，推荐)
+  import hmac, hashlib
+  hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest() == sig.removeprefix("sha256=")
+  ```
+
+  路由级 `secret` 覆盖全局 `webhook_secret`(两者皆未配置则不带签名头);
+  密钥只在请求头中出现，不落日志。注意：接收方比较 hex 必须**恒定时间**
+  (如上 `hmac.verify` / `hmac.compare_digest`),不要用普通 `==`。
+
+  **推送 body 同验签 (F34)**:`[metrics] secret` 配置后，周期推送 (POST
+  MetricsReport JSON) 同样带 `X-Service-Watch-Signature` 头，签名对象 =
+  收到的原始 body 字节 —— 上面的 openssl / python 验签方法对推送 body
+  完全复用 (与 webhook 签名同一共享实现，头名与格式一致)。
+
+- **自定义投递头 (F37)**:`[alert] headers`(全局)+ 路由级 `headers` 配置后，
+  每笔投递**全部**附带 (接收方 auth token、Grafana/Signoz 类集成的通用注入口):
+
+  ```toml
+  [alert]
+  headers = { X-Auth-Token = "global-secret" }   # 全局;默认通道用全局表
+  [[alert.routes]]
+  match = "edge"
+  url = "https://hooks.example.com/edge"
+  headers = { X-Auth-Token = "route-secret", X-Team = "edge" }  # 同名键覆盖全局,非同名键共存
+  ```
+
+  合并语义 = **路由级同名键覆盖全局**(默认通道用全局表);自定义头与签名头
+  (F29) 独立共存 —— 签名头总是附加,不因同名自定义头丢弃;**不要自定义保留头**
+  `X-Service-Watch-Signature`(会产生两个同名头,多数接收端取第一个或拒绝)。
+  注入面校验 (配置层拒绝,退出码 1):头名必须为非空 RFC 7230 token,值不得为空
+  或含 CR/LF/控制字符。slack/json 两格式与 spool 重放同路径生效;头值可能是
+  敏感 token,只进请求头,不落日志/审计。
 
 ## 4. 健康检查端点 (DESIGN §9.2)
 
 | 端点 | 成功 | 失败 | 字段说明 |
 |---|---|---|---|
-| `GET /health` | 200 空体 | 连接拒绝=进程死 | **浅存活**:HTTP 栈可达即 200，不反映配置/调度状态 |
+| `GET /health` | 200 空体 | 连接拒绝=进程死 | **浅存活**:HTTP 栈可达即 200，不反映配置/调度状态;**始终免鉴权** |
 | `GET /ready` | 200 `{"ready":true}` | 503 `{"ready":false}` | 配置加载成功 + 调度循环已启动;**降级采集不影响 ready**(温度缺失走 Degradation，属正常降级) |
 | `GET /status` | 200 StatusReport | — | 见下 |
 | `GET /metrics` | 200 JSON | — | `?format=prometheus` 或 `Accept: text/plain` 得 Prometheus 文本 (前缀 `service_watch_`) |
-| `GET /metrics/history?range=<secs>` | 200 JSON | 400 非法 range | 缺省 300s,上限 7200s;>600 点降采样保留首尾 |
+| `GET /metrics/history?range=<secs>` | 200 JSON | 400 非法 range | 缺省 300s，上限 7200s;>600 点降采样保留首尾 |
 | `GET /` | 200 text/html | — | 只读状态页 (页内 JS 每 2s 轮询 /status+/metrics) |
+| `GET /v1/config` | 200 JSON | — | 生效配置快照 (F33):token/签名密钥以 `***redacted***` 占位，其余原样;占位不可回灌配置;`monitorctl config` 消费 |
+
+**鉴权 (F23，可选 Bearer 令牌)**:`[control] token` 配置后，除 `GET /health` 外
+上表全部端点 (含状态页 `GET /`) 要求 `Authorization: Bearer <token>`,缺失或
+错误一律 401。注意：状态页页内 JS 直接 `fetch('/status')`,无法携带自定义头
+—— 鉴权开启后浏览器直开 `/` 会 401，如需页面请经反向代理注入头，或对浏览
+器来源放开防火墙限制而保持 token 只给 API 调用方。monitorctl 用 `--token`
+或 `SERVICE_WATCH_TOKEN` 携带 (§1.1)。agent 未配置 token 时忽略任何
+Authorization 头 (行为与 v0.3 一致)。
 
 `/status` 结构：
 
@@ -324,7 +618,7 @@ jq -c . "$J" > /dev/null || echo "存在坏行,见 deploy/README.md §5.3"
 Prometheus 文本 (`--prom` / `?format=prometheus`) 与 JSON 字段同名 (前缀
 `service_watch_`),唯一例外：`last_collect_at` 在文本格式中输出为
 `service_watch_last_collect_timestamp_seconds`(epoch 秒;尚未完成任何采集时该
-指标整行不输出 —— 抓取侧表现为无数据,而非 0)。
+指标整行不输出 —— 抓取侧表现为无数据，而非 0)。
 
 运维基线告警建议：`alert_delivery_failures` 增长、`alerts_dropped` 增长、
 `probe_skipped` 持续增长、`recovery_fatal > 0`、`degradations_events` 突增、
@@ -342,7 +636,11 @@ Prometheus 文本 (`--prom` / `?format=prometheus`) 与 JSON 字段同名 (前�
 │  └─ 在跑但连不上：
 │      ├─ [control].enabled = false?         → 开启并重启 agent
 │      ├─ listen 与 monitorctl --url 不一致  → 对齐
-│      └─ 防火墙 (仅当 listen 改为非回环)    → 收回环或按需放行 (默认无鉴权，慎改)
+│      ├─ HTTP 401 (F23 鉴权开启)            → monitorctl 加 --token 或设
+│      │                                        SERVICE_WATCH_TOKEN;/health 恒免鉴权
+│      └─ 防火墙 (仅当 listen 改为非回环)    → 收回环或按需放行 (可选 Bearer 令牌：
+│                                                [control] token，见 §4;未配置 = 不鉴权，
+│                                                依赖网络层隔离，慎改)
 │
 【B】check 全面 Critical
 ├─ 目标真挂了？curl / nc 直连目标;挂了 → supervise 由恢复状态机接管，attach 只告警 (设计)
@@ -383,7 +681,7 @@ Prometheus 文本 (`--prom` / `?format=prometheus`) 与 JSON 字段同名 (前�
   刷新 (DESIGN §6.2),不随全机进程数增长。
 - 在途探测上限 1 + `timeout < interval` 配置校验 ⇒ 探测不会堆积;调度退化为
   "跳过并计数"(`probe_skipped`),不会雪崩。
-- 内存:无硬预算;24h 长跑完成门 (F17) 已 PASS:RSS 稳态增长 176KB (无泄漏
+- 内存：无硬预算;24h 长跑完成门 (F17) 已 PASS:RSS 稳态增长 176KB (无泄漏
   指征),常驻数十 MB 量级;巡检关注 RSS 缓慢增长 + `/metrics` 的 `uptime_secs`
   与 `state_transitions_total` 对照是否同步增长 (排除"重启清零"的假象)。
 
@@ -398,6 +696,18 @@ journal——安静系统接近零增长。
   后只记 Flap 摘要，事件本身仍入 journal 但不再翻倍)。
 - 量级示例:100 个 check、每天都有 10 个 incident → 约 2–5 MB/日 → 年 < 2 GB。
   **建议无论如何配置轮转**(§6.3),并把 `jq -c .` 校验纳入季度巡检。
+- **内置轮转后的运维口径 (F24)**:默认 `journal_max_size = 10 MiB` 下，当前文件
+  超限即整体改名 `journal.1.jsonl`(上一代，只保留一代) 并从零续写;轮转事件
+  (`audit`,`"journal rotated: <前> bytes -> …"`) 记录在新文件首行。运维侧：
+  `journal.1.jsonl` 是封存的历史代，可随时归档/压缩/删除;外部 copytruncate/
+  logrotate (§6.3) 与内置轮转可共存 (内置轮转按文件实测尺寸判断，外部清零后
+  不会误轮转),两者叠加时注意归档脚本把 `journal.1.jsonl` 一并收走。
+- **metrics 历史文件的增长口径 (F39)**:`[metrics] history_path` 开启后每
+  eval tick 落一行 (默认 tick 粒度 1s,单行 ~1 KB) → 满载约 80–90 MB/日,
+  内置单代轮转 (10 MiB → `.1`,写后实测尺寸) 是**预期常态**而非异常 ——
+  巡检按「当前文件 + `.1`」两代核对容量,`.1` 归档/压缩/删除随意 (writer
+  只持当前文件句柄)。外部轮转工具口径 (copytruncate 兼容 / rename 式无效 /
+  不得删主文件) 与逐日容量估算见 §1.2f。
 
 ### 6.3 日志轮转
 
@@ -490,3 +800,20 @@ agent 重启后先核对 journal 记录的进程身份。确认存活时 `/statu
 初始化降级、权限不足或未验证身份与观测值漂移时，对账持续等待。先恢复采集权限并核对进程状态，避免另起同名实例。旧版 journal 未保存身份，以及 spawn 成功到首次身份确认前发生崩溃的场景，仍需要运维核查遗留进程。
 
 一个 data_dir 由一个 agent 实例使用。同一进程内的 spool 事务按目录互斥，重放收到成功确认后才移除，取消时保留原件。普通内存队列与尚未落盘事件仍可能在强杀时丢失。磁盘真实卡死中的阻塞系统调用无法由 Rust 任务取消，关键确认超时会停止调度，存储恢复后应先检查 journal 再重新启动。
+
+**重启后 open incident 恢复与重通知 (F25)**:重放不仅恢复 Fatal/预算,也恢复
+仍 open 的 incident(§3.2「重启后的恢复重通知」)。运维侧预期：
+
+- agent 一启动，`/status` 各 target 的 `incident` 字段即呈现恢复的告警级别
+  (critical 保持 critical),webhook 面板会收到 `reason` 带
+  `restored from journal:` 前缀的通知 —— 这是**特性不是重复告警**:运维由此
+  感知"重启时仍有未闭合故障"。
+- `/metrics` 的 `checks_ok|warning|critical` 与 target 的 `health` 来自检查
+  状态机，**fresh 起步**,随 live 探测在数个 interval 内自然回到真实水位
+  ( Warning 一轮、Critical 连续 `failure_threshold` 轮);不要把重启后头几个
+  interval 的 ok/warning 读数当成"故障已恢复"——以 `incident` 字段与通知为准。
+- 故障若真已恢复：连续成功到达后正常收到 `resolve` 通知，journal 闭合该
+  incident;恢复期间的通知窗口从恢复重通知起算。
+- 若配置里已删除对应 check,journal 遗留的 open incident 仍会重通知一次
+  (运维感知),但不会再有后续事件;手工清理请忽略该条历史，或等待 journal
+  轮转淘汰 (§6.2)。

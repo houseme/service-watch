@@ -7,8 +7,12 @@
 // webhook 通知器依赖 reqwest(http-client feature);无 C 依赖的交叉编译
 // feature 组合 (DESIGN §6.5) 下不参与编译。spool 不依赖 reqwest，恒参与编译。
 // 指标周期推送依赖 reqwest(http-client feature),与 webhook 同款门控。
+// F34:HMAC 签名共享 helper (webhook F29 与 metrics_push F34 复用) 与两
+// 消费方同在 http-client 门控内。
 #[cfg(feature = "http-client")]
 pub mod metrics_push;
+#[cfg(feature = "http-client")]
+pub mod signature;
 pub mod spool;
 #[cfg(feature = "http-client")]
 pub mod webhook;
@@ -27,6 +31,49 @@ use crate::model::control::MetricsReport;
 #[async_trait]
 pub trait Notifier: Send + Sync {
     async fn notify(&self, event: &AlertEvent) -> Result<()>;
+}
+
+/// F26:按目标告警路由。持默认 notifier(兜底，可为 noop)+ 顺序路由表;
+/// `notify` 按 `event.target` 匹配:pattern `*` 通配全部 target，否则 target
+/// **前缀匹配** (`starts_with`);**顺序首条生效**,无匹配走默认通道。
+///
+/// - 空 routes 时行为与直接使用 default 完全一致 (默认向后兼容);
+/// - 投递语义 (超时/退避/队列/spool at-least-once) 由分发层统一处理，
+///   路由只决定目标;spool 重放走同一 notifier 实例 → 按**当前配置**路由;
+/// - `webhook_url` 为空且无匹配时回落 noop 默认通道 = 事件不外投
+///   (与现状「空 = 不投递」口径一致，事件仍入 journal/日志)。
+pub struct RoutingNotifier {
+    default: Arc<dyn Notifier>,
+    routes: Vec<(String, Arc<dyn Notifier>)>,
+}
+
+impl RoutingNotifier {
+    pub fn new(default: Arc<dyn Notifier>, routes: Vec<(String, Arc<dyn Notifier>)>) -> Self {
+        Self { default, routes }
+    }
+
+    /// 路由匹配纯函数 (可单测):返回命中的路由 notifier;None = 走默认。
+    /// `*` 作整段 pattern 时匹配全部 target;其余按前缀 `starts_with` 判定。
+    /// 空 pattern 恒不命中 (`starts_with("")` 恒真，防御库调用方直构绕过
+    /// config 校验 —— P3 第九轮验证;产品路径 validate 已拦空白 match)。
+    fn route_for(&self, target: &str) -> Option<&Arc<dyn Notifier>> {
+        self.routes
+            .iter()
+            .find(|(pattern, _)| {
+                !pattern.is_empty() && (pattern == "*" || target.starts_with(pattern.as_str()))
+            })
+            .map(|(_, notifier)| notifier)
+    }
+}
+
+#[async_trait]
+impl Notifier for RoutingNotifier {
+    async fn notify(&self, event: &AlertEvent) -> Result<()> {
+        match self.route_for(&event.target) {
+            Some(notifier) => notifier.notify(event).await,
+            None => self.default.notify(event).await,
+        }
+    }
 }
 
 /// 内部计数 (/metrics 暴露)。
@@ -750,5 +797,173 @@ mod tests {
             shutdown_tx.send(true).expect("shutdown send");
             wait_for(|| task.is_finished()).await;
         });
+    }
+
+    // ---- F26:RoutingNotifier 按目标路由 ----
+
+    /// 收集 (通道标签，target) 的 Notifier 假实现 (路由断言用)。
+    struct RecordingNotifier {
+        tag: &'static str,
+        hits: Arc<Mutex<Vec<(&'static str, String)>>>,
+    }
+
+    impl RecordingNotifier {
+        fn new(tag: &'static str, hits: Arc<Mutex<Vec<(&'static str, String)>>>) -> Arc<Self> {
+            Arc::new(Self { tag, hits })
+        }
+    }
+
+    #[async_trait]
+    impl Notifier for RecordingNotifier {
+        async fn notify(&self, event: &AlertEvent) -> Result<()> {
+            self.hits
+                .lock()
+                .expect("hits lock poisoned")
+                .push((self.tag, event.target.clone()));
+            Ok(())
+        }
+    }
+
+    fn event_with_target(target: &str) -> AlertEvent {
+        AlertEvent {
+            incident: AlertEvent::incident_key(target, "c"),
+            category: Category::Alert,
+            severity: Severity::Warning,
+            target: target.into(),
+            check: "c".into(),
+            reason: "probe failed".into(),
+            observed: None,
+            first_seen: SystemTime::UNIX_EPOCH,
+            last_seen: SystemTime::UNIX_EPOCH,
+            occurrences: 1,
+        }
+    }
+
+    /// 顺序首条生效：两条 pattern 都命中同一 target 时取配置序靠前者。
+    #[tokio::test]
+    async fn routing_first_match_in_order_wins() {
+        let hits: Arc<Mutex<Vec<(&'static str, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let a = RecordingNotifier::new("a", hits.clone());
+        let b = RecordingNotifier::new("b", hits.clone());
+        let default = RecordingNotifier::new("default", hits.clone());
+        let routing = RoutingNotifier::new(
+            default as Arc<dyn Notifier>,
+            vec![
+                ("edge".into(), a as Arc<dyn Notifier>),
+                ("edge-1".into(), b as Arc<dyn Notifier>),
+            ],
+        );
+        routing.notify(&event_with_target("edge-1")).await.unwrap();
+        assert_eq!(
+            *hits.lock().unwrap(),
+            vec![("a", "edge-1".to_string())],
+            "两条 pattern 都命中时顺序首条生效"
+        );
+    }
+
+    /// `*` 通配全部 target (整段 pattern 语义)。
+    #[tokio::test]
+    async fn routing_wildcard_matches_all_targets() {
+        let hits: Arc<Mutex<Vec<(&'static str, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let any = RecordingNotifier::new("any", hits.clone());
+        let routing = RoutingNotifier::new(
+            RecordingNotifier::new("default", hits.clone()),
+            vec![("*".into(), any as Arc<dyn Notifier>)],
+        );
+        routing.notify(&event_with_target("web-1")).await.unwrap();
+        routing.notify(&event_with_target("db-0")).await.unwrap();
+        let log = hits.lock().unwrap();
+        assert_eq!(log.len(), 2, "* 通配全部 target");
+        assert!(log.iter().all(|(tag, _)| *tag == "any"));
+    }
+
+    /// 无匹配回落默认通道 (默认 = 兜底，与 routes 并存)。
+    #[tokio::test]
+    async fn routing_no_match_falls_back_to_default() {
+        let hits: Arc<Mutex<Vec<(&'static str, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let routed = RecordingNotifier::new("routed", hits.clone());
+        let default = RecordingNotifier::new("default", hits.clone());
+        let routing = RoutingNotifier::new(
+            default as Arc<dyn Notifier>,
+            vec![("edge".into(), routed as Arc<dyn Notifier>)],
+        );
+        routing.notify(&event_with_target("db-0")).await.unwrap();
+        routing.notify(&event_with_target("edge-1")).await.unwrap();
+        assert_eq!(
+            *hits.lock().unwrap(),
+            vec![
+                ("default", "db-0".to_string()),
+                ("routed", "edge-1".to_string()),
+            ],
+            "无匹配走默认，前缀命中走路由"
+        );
+    }
+
+    /// 空 routes = 行为与现状 (直接使用默认 notifier) 完全一致。
+    #[tokio::test]
+    async fn routing_empty_routes_equals_bare_default() {
+        let hits: Arc<Mutex<Vec<(&'static str, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let default = RecordingNotifier::new("default", hits.clone());
+        let routing = RoutingNotifier::new(default as Arc<dyn Notifier>, Vec::new());
+        routing.notify(&event_with_target("web-1")).await.unwrap();
+        routing.notify(&event_with_target("db-0")).await.unwrap();
+        let log = hits.lock().unwrap();
+        assert_eq!(log.len(), 2, "全部事件走默认通道");
+        assert!(log.iter().all(|(tag, _)| *tag == "default"));
+    }
+
+    /// 空 pattern 恒不命中 (P3 第九轮验证：防御库调用方直构绕过 config 校验)。
+    #[tokio::test]
+    async fn routing_empty_pattern_never_matches() {
+        let hits: Arc<Mutex<Vec<(&'static str, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let routed = RecordingNotifier::new("routed", hits.clone());
+        let default = RecordingNotifier::new("default", hits.clone());
+        let routing = RoutingNotifier::new(
+            default as Arc<dyn Notifier>,
+            vec![("".into(), routed as Arc<dyn Notifier>)],
+        );
+        routing
+            .notify(&event_with_target("any-target"))
+            .await
+            .unwrap();
+        let log = hits.lock().unwrap();
+        assert_eq!(
+            *log,
+            vec![("default", "any-target".to_string())],
+            "空 pattern 不命中，回落默认"
+        );
+    }
+
+    /// 每个事件按 target 送达正确的 mock 通道 (多路由 + 默认兜底)。
+    #[tokio::test]
+    async fn routing_sends_each_target_to_its_own_channel() {
+        let hits: Arc<Mutex<Vec<(&'static str, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let edge = RecordingNotifier::new("edge", hits.clone());
+        let db = RecordingNotifier::new("db", hits.clone());
+        let default = RecordingNotifier::new("default", hits.clone());
+        let routing = RoutingNotifier::new(
+            default as Arc<dyn Notifier>,
+            vec![
+                ("edge".into(), edge as Arc<dyn Notifier>),
+                ("db".into(), db as Arc<dyn Notifier>),
+            ],
+        );
+        routing
+            .notify(&event_with_target("edge-worker-1"))
+            .await
+            .unwrap();
+        routing
+            .notify(&event_with_target("db-primary"))
+            .await
+            .unwrap();
+        routing.notify(&event_with_target("misc-0")).await.unwrap();
+        assert_eq!(
+            *hits.lock().unwrap(),
+            vec![
+                ("edge", "edge-worker-1".to_string()),
+                ("db", "db-primary".to_string()),
+                ("default", "misc-0".to_string()),
+            ]
+        );
     }
 }

@@ -125,6 +125,26 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
     } else {
         None
     };
+    // F32:TLS 证书/私钥与端口 bind 同列「装配期早失败」点 —— 坏 PEM/缺失
+    // 文件与端口占用一样在 data_dir 创建前暴露 (Err 早退 → main 退出码 2),
+    // 不进主循环。加载结果 (None = 纯 HTTP 现状) 移交控制面 spawn 分支;错误
+    // 只含路径与解析原因，私钥内容不落日志 (control::load_tls_config)。
+    // P3(第十一轮验证):与 bind 同受 control.enabled 门控 —— 控制面关闭时
+    // TLS 配置不会被消费，坏材料不应阻止 agent 启动。
+    // F38:client_ca_cert(Some = mTLS 客户端证书校验) 随同一装配点加载，
+    // CA 缺失/坏 PEM 同列早退(verifier 内嵌于 RustlsConfig，bind_and_serve
+    // 签名不变)。
+    #[cfg(feature = "control-http")]
+    let control_tls = if cfg.control.enabled {
+        crate::control::load_tls_config(
+            cfg.control.tls_cert.as_deref(),
+            cfg.control.tls_key.as_deref(),
+            cfg.control.client_ca_cert.as_deref(),
+        )
+        .await?
+    } else {
+        None
+    };
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     #[cfg(unix)]
@@ -182,11 +202,14 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
         collect_loop(cfg.clone(), shutdown_flag.clone(), watched.clone());
 
     // ---- journal 写任务 ----
-    let journal_task = tokio::spawn(journal::run_tracked_writer(
+    // F24:轮转阈值从 `agent.journal_max_size` 传入 (0 = 完全禁用轮转);
+    // 确认式持久化语义不变 —— journal_tx.counters() 链路未动。
+    let journal_task = tokio::spawn(journal::run_tracked_writer_with_limit(
         journal_file,
         journal_path,
         journal_rx,
         journal_tx.counters().clone(),
+        cfg.agent.journal_max_size,
     ));
 
     // ---- F12 spool 目录 (投递失败的事件落盘，at-least-once)----
@@ -204,11 +227,17 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
             metrics_url,
             cfg.metrics.interval,
             cfg.metrics.timeout,
+            // F34:推送签名密钥 (None = 不签名);密钥值不进日志，只报布尔。
+            cfg.metrics.secret.clone(),
             metrics_rx.clone(),
             shutdown_rx.clone(),
             Some(journal_tx.clone()),
         ));
-        tracing::info!(interval = ?cfg.metrics.interval, "metrics push enabled");
+        tracing::info!(
+            interval = ?cfg.metrics.interval,
+            signed = cfg.metrics.secret.is_some(),
+            "metrics push enabled"
+        );
         Some(handle)
     } else {
         None
@@ -221,6 +250,26 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
             "metrics push enabled but http-client feature disabled; periodic push inactive"
         );
     }
+
+    // ---- F39 指标历史持久化 (独立 writer 任务;消费 metrics watch)----
+    // 与 metrics push 无 feature 耦合 (纯文件出口，不依赖 reqwest)——任何
+    // feature 组合下 history_path 配置即生效。只持有 metrics watch 接收端，
+    // 不持 journal_tx;JoinHandle 保留，停机在 metrics pusher 收口之后
+    // abort+await (与第十二轮 metrics pusher 收口同款)。
+    let metrics_history_task = if let Some(history_path) = cfg.metrics.history_path.clone() {
+        let handle = tokio::spawn(crate::metrics_history::run_history_writer(
+            history_path.clone(),
+            metrics_rx.clone(),
+        ));
+        tracing::info!(
+            history_path = %history_path.display(),
+            rotate_at = crate::metrics_history::HISTORY_ROTATE_THRESHOLD,
+            "metrics history persistence enabled"
+        );
+        Some(handle)
+    } else {
+        None
+    };
 
     // ---- deadman 心跳 (单次启动，与分发任务解耦)----
     #[cfg(feature = "notify-webhook")]
@@ -278,6 +327,10 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
     for svc in &cfg.services {
         pm.register(svc.clone());
     }
+    // F33:生效配置视图通道 —— 初始快照由启动 cfg 构造;eval reload 成功后经
+    // tx 推送新值，控制面经 rx 只读透传 (reload 后即新值)。
+    let (config_view_tx, config_view_rx) =
+        tokio::sync::watch::channel(Arc::new(serde_json::json!(cfg.redacted())));
     let handles = crate::eval::SchedulerHandles {
         snapshot_rx: snapshot_rx.clone(),
         alert: queue.clone(),
@@ -289,6 +342,7 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
         pm,
         replayed,
         config_path,
+        config_view_tx,
     };
     let mut eval_task = tokio::spawn(crate::eval::run(cfg.clone(), handles));
 
@@ -308,9 +362,18 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
         snapshot_rx,
         cmd_tx: cmd_tx.clone(),
         alert_counters: counters.clone(),
+        token: cfg.control.token.clone(), // F23:可选 Bearer 令牌传入控制平面
+        // F28:/v1/journal 尾部查询 —— journal_path 本体已移交 journal writer,
+        // 此处按同一规则重算 (data_dir 固定约定，无二次漂移面)。
+        journal_path: cfg.agent.data_dir.join("journal.jsonl"),
+        // F33:/v1/config 生效配置视图 —— watch 接收端，初始值 = 启动快照，
+        // eval reload 成功后刷新 (redacted() 占位后序列化，明文密钥不出 agent;
+        // 控制平面只读透传，字段 doc)。
+        config_view: config_view_rx,
     });
     // 原件立即释放:control 启用时通道由 shared 持有;未启用则通道关闭，
-    // eval 的命令 select 分支停用 (recv 返回 None，不算停机信号)。
+    // eval 的命令 select 分支停用 (recv 返回 None，不算停机信号);config_view
+    // 出口例外 —— 无接收端时 send 静默丢弃 (F33 handle doc 注明),非 debug 日志。
     // F14:SIGHUP 热重载专用出口 (仅 unix;上面保留的 clone 由运行循环持有，
     // 控制平面未启用时 SIGHUP 重载依然可用)。
     #[cfg(unix)]
@@ -321,8 +384,19 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
         #[cfg(feature = "control-http")]
         {
             let listener = control_listener.expect("enabled control listener prebound");
-            let handle = tokio::spawn(crate::control::bind_and_serve(listener, shared));
-            tracing::info!(listen = %cfg.control.listen, "control plane listening");
+            // F32:control_tls = None → 纯 HTTP(现状);Some(config) → 同一预
+            // bind 监听器换 rustls acceptor，纯 HTTPS。接受循环仍由 runtime
+            // abort 停机 (control 模块 doc「停机与 409 语义」+「F32 控制面 HTTPS」)。
+            let handle = tokio::spawn(crate::control::bind_and_serve(
+                listener,
+                shared,
+                control_tls,
+            ));
+            tracing::info!(
+                listen = %cfg.control.listen,
+                tls = cfg.control.tls_cert.is_some(),
+                "control plane listening"
+            );
             Some(handle)
         }
         #[cfg(not(feature = "control-http"))]
@@ -471,6 +545,15 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
     // 再关运行时侧 sender —— 否则下方 drop 不闭合通道，flush 窗口必超时。
     #[cfg(feature = "http-client")]
     if let Some(handle) = metrics_push_task {
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    // F39:指标历史 writer 同款收口 (abort+await) —— 位置在 metrics pusher
+    // 之后、journal drop 之前。writer 只持 metrics watch 接收端，无 journal_tx
+    // 需要释放;abort 只能落在 `changed().await` 点 (写入段无 await，不会截断
+    // 半行)，最后在途样本可能不落盘 —— 观测数据出口，可接受。
+    if let Some(handle) = metrics_history_task {
         handle.abort();
         let _ = handle.await;
     }
@@ -631,18 +714,106 @@ impl Notifier for NoopNotifier {
 
 /// 通知器装配:`webhook_url` 有值 → `WebhookNotifier`(payload 格式由
 /// `webhook_format` 决定，DESIGN §7.3);无值或构建失败 → [`NoopNotifier`]。
+/// F26:`routes` 非空时以默认通道为兜底构建 [`RoutingNotifier`]——每条 route
+/// 一个独立 `WebhookNotifier`(url/format 取 route 配置);投递语义 (超时/退避/
+/// 队列/spool) 由分发层统一处理，路由只选目标。构建失败的 route 记 WARN 后
+/// 跳过：该 pattern 永不命中，对应 target 回落默认通道 (与 webhook_url 构建
+/// 失败降级 Noop 口径一致)。`webhook_url` 为空且无匹配时回落 Noop = 事件
+/// 不外投 (与现状「空 = 不投递」一致，事件仍入 journal/日志)。
+/// F29:默认通道用 `webhook_secret`,每条 route 用 [`effective_route_secret`]
+/// (路由级覆盖全局;两者皆 None 不签名)。密钥值不进日志。
+/// F37:默认通道传全局 `[alert] headers`,每条 route 用 [`effective_route_headers`]
+/// (全局为底,路由级同名键覆盖)。头值可能是敏感 token,不进日志。
 fn build_notifier(cfg: &AlertCfg) -> Arc<dyn Notifier> {
+    let default = build_default_notifier(cfg);
+    if cfg.routes.is_empty() {
+        return default; // 空 routes = 行为与现状完全一致
+    }
+    #[cfg(feature = "notify-webhook")]
+    let routes: Vec<(String, Arc<dyn Notifier>)> = cfg
+        .routes
+        .iter()
+        .filter_map(|route| {
+            let secret =
+                effective_route_secret(route.secret.as_deref(), cfg.webhook_secret.as_deref());
+            let headers = effective_route_headers(&route.headers, &cfg.headers);
+            match crate::alert::webhook::WebhookNotifier::new(
+                route.url.clone(),
+                route.format,
+                cfg.timeout,
+                secret,
+                headers,
+            ) {
+                Ok(n) => Some((route.r#match.clone(), Arc::new(n) as Arc<dyn Notifier>)),
+                Err(e) => {
+                    tracing::warn!(
+                        r#match = %route.r#match,
+                        source = %e,
+                        "route webhook build failed; 该路由 target 回落默认通道"
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
+    #[cfg(not(feature = "notify-webhook"))]
+    let routes: Vec<(String, Arc<dyn Notifier>)> = {
+        tracing::warn!(
+            "alert.routes configured but notify-webhook feature disabled; routes inactive (全部回落默认通道)"
+        );
+        Vec::new()
+    };
+    // P3(第九轮验证):同时上报配置条数与存活条数 —— 构建失败跳过的 route
+    // 会让两者不一致，只报 len 会误导运维。
+    tracing::info!(
+        routes = routes.len(),
+        configured = cfg.routes.len(),
+        "alert target routing enabled"
+    );
+    Arc::new(crate::alert::RoutingNotifier::new(default, routes))
+}
+
+/// F29:路由级签名密钥解析 —— `route.secret` **覆盖**全局 `webhook_secret`,
+/// 两者皆 None = 不签名 (纯函数，便于单测)。
+#[cfg(feature = "notify-webhook")]
+fn effective_route_secret(route: Option<&str>, global: Option<&str>) -> Option<String> {
+    route.or(global).map(str::to_string)
+}
+
+/// F37:路由级投递头合并 —— 全局 `[alert] headers` 为底,`route.headers` 同名键
+/// **覆盖**全局,非同名键共存 (BTreeMap 顺序插入即覆盖;纯函数,便于单测)。
+/// 头值可能是敏感 token:只随 notifier 进请求头,不落日志/审计。
+#[cfg(feature = "notify-webhook")]
+fn effective_route_headers(
+    route: &std::collections::BTreeMap<String, String>,
+    global: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut merged = global.clone();
+    for (name, value) in route {
+        merged.insert(name.clone(), value.clone());
+    }
+    merged
+}
+
+/// 默认 (兜底) 通道装配：既有 `webhook_url` 逻辑，行为不变。
+fn build_default_notifier(cfg: &AlertCfg) -> Arc<dyn Notifier> {
     #[cfg(feature = "notify-webhook")]
     if let Some(url) = cfg.webhook_url.clone() {
         return match crate::alert::webhook::WebhookNotifier::new(
             url,
             cfg.webhook_format,
             cfg.timeout,
+            cfg.webhook_secret.clone(),
+            cfg.headers.clone(),
         ) {
             Ok(n) => {
+                // F29:signed 只报「是否启用签名」,密钥值不落日志。
+                // F37:headers 数量只报规模,头名/头值都不落日志。
                 tracing::info!(
                     format = ?cfg.webhook_format,
                     timeout = ?cfg.timeout,
+                    signed = cfg.webhook_secret.is_some(),
+                    headers = cfg.headers.len(),
                     "webhook notifier enabled"
                 );
                 Arc::new(n)
@@ -665,6 +836,67 @@ fn build_notifier(cfg: &AlertCfg) -> Arc<dyn Notifier> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- F29:路由级签名密钥解析 ----
+
+    /// `route.secret` 覆盖全局 `webhook_secret`;两者皆 None 不签名。
+    #[cfg(feature = "notify-webhook")]
+    #[test]
+    fn route_secret_overrides_global_webhook_secret() {
+        assert_eq!(
+            effective_route_secret(Some("route"), Some("global")),
+            Some("route".into()),
+            "路由级覆盖全局"
+        );
+        assert_eq!(
+            effective_route_secret(None, Some("global")),
+            Some("global".into()),
+            "路由未配置回落全局"
+        );
+        assert_eq!(
+            effective_route_secret(Some("route"), None),
+            Some("route".into()),
+            "仅路由配置 = 只对该路由签名"
+        );
+        assert_eq!(
+            effective_route_secret(None, None),
+            None,
+            "两者皆 None = 不签名"
+        );
+    }
+
+    // ---- F37:路由级投递头合并 ----
+
+    /// 合并语义:`route.headers` 同名键**覆盖**全局,非同名键共存;空表各自成立。
+    #[cfg(feature = "notify-webhook")]
+    #[test]
+    fn route_headers_override_global_and_nonconflicting_coexist() {
+        let mut global = std::collections::BTreeMap::new();
+        global.insert("X-Auth-Token".to_string(), "global-secret".to_string());
+        global.insert("X-Global-Only".to_string(), "g".to_string());
+        let mut route = std::collections::BTreeMap::new();
+        route.insert("X-Auth-Token".to_string(), "route-secret".to_string());
+        route.insert("X-Route-Only".to_string(), "r".to_string());
+
+        let merged = effective_route_headers(&route, &global);
+        assert_eq!(merged.len(), 3, "同名键覆盖后 3 键共存");
+        assert_eq!(
+            merged.get("X-Auth-Token").map(String::as_str),
+            Some("route-secret"),
+            "路由级同名键覆盖全局"
+        );
+        assert_eq!(merged.get("X-Global-Only").map(String::as_str), Some("g"));
+        assert_eq!(merged.get("X-Route-Only").map(String::as_str), Some("r"));
+
+        // 路由未配 headers → 原样继承全局。
+        let inherited = effective_route_headers(&std::collections::BTreeMap::new(), &global);
+        assert_eq!(inherited, global, "空路由表 = 原样继承全局");
+        // 全局未配 → 只有路由级。
+        let mut only_route = std::collections::BTreeMap::new();
+        only_route.insert("X-Auth-Token".to_string(), "route-secret".to_string());
+        let solo = effective_route_headers(&only_route, &std::collections::BTreeMap::new());
+        assert_eq!(solo, only_route, "空全局表 = 仅路由级");
+    }
 
     struct HealthyCollector;
 
