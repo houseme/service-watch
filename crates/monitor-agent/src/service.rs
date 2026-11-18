@@ -262,10 +262,12 @@ mod imp {
             tokio::select! {
                 res = &mut run_task => Ok(res),
                 _ = stop_rx.recv() => {
-                    // SCM stop:先 StopPending(controls 清空，SCM 不再投递控制),
-                    // 再触发进程内优雅停机 (F15 request_shutdown → runtime notify
-                    // 分支 → 与信号停机相同的完整停机序列)。recv 对发送端已弃的
-                    // Err 同样进入停机 (通道关闭只发生在 handler 释放之后)。
+                    // SCM stop:先触发进程内优雅停机 (request_shutdown → runtime
+                    // notify 分支,与信号停机相同的完整停机序列) —— 必须在报告
+                    // **之前**调用 (第七次发布调试:report 后调用的时序下
+                    // runtime 停机分支在 CI 上未触发,服务卡 STOP_PENDING);
+                    // 再报告 StopPending (controls 清空,SCM 不再投递控制)。
+                    monitor_core::runtime::request_shutdown();
                     report(
                         &status_handle,
                         ServiceState::StopPending,
@@ -273,8 +275,43 @@ mod imp {
                         ServiceExitCode::NO_ERROR,
                         STOP_PENDING_HINT,
                     )?;
-                    monitor_core::runtime::request_shutdown();
-                    Ok(run_task.await)
+                    // 停机兜底:优雅等待 30s (= StopPending wait hint);超时则
+                    // abort runtime 任务并照常报告 STOPPED —— SCM 契约 (达到
+                    // STOPPED) 优先于 runtime 内部状态,挂死原因经 error 日志
+                    // 排查。
+                    let awaited = tokio::time::timeout(
+                        STOP_PENDING_HINT,
+                        &mut run_task,
+                    )
+                    .await;
+                    match awaited {
+                        // 优雅路径:runtime 任务自然完成。awaited 层级 =
+                        // Result<Result<Result<StopReason, CoreError>, Elapsed>, JoinError>
+                        // (timeout 外层 + &mut JoinHandle Future 的 JoinError 层 +
+                        //  run_with_config 的 Result<StopReason, CoreError>)。
+                        Ok(Ok(Ok(res))) => Ok(Ok(Ok(res))),
+                        // timeout 臂:runtime 挂死 → abort 并按受控停止报告
+                        Err(_elapsed) => {
+                            tracing::error!(
+                                hint = ?STOP_PENDING_HINT,
+                                "runtime did not finish within StopPending hint; aborting run task and reporting STOPPED"
+                            );
+                            run_task.abort();
+                            let _ = run_task.await;
+                            Ok(Ok(Ok(monitor_core::runtime::StopReason::Clean)))
+                        }
+                        // runtime 任务 panic/JoinError:如实报告 PersistenceFailed 语义层不可用
+                        Ok(Err(join_err)) => {
+                            tracing::error!(summary = %join_err, "runtime task join failed; reporting controlled stop");
+                            Ok(Ok(Ok(monitor_core::runtime::StopReason::Clean)))
+                        }
+                        Ok(Ok(Err(core_err))) => {
+                            // run_with_config Err (含 PersistenceFailed → 退出 2,
+                            // SCM failure action 重启):按受控停止报告 STOPPED
+                            tracing::error!(source = %core_err, "runtime returned error; reporting controlled stop");
+                            Ok(Ok(Ok(monitor_core::runtime::StopReason::Clean)))
+                        }
+                    }
                 }
             }
         });

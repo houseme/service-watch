@@ -36,7 +36,7 @@ compiles without any C-toolchain dependency (no reqwest/axum).
 
 ```toml
 [dependencies]
-monitor-core = { version = "0.2", default-features = false, features = ["collect-sysinfo", "probe-http"] }
+monitor-core = { version = "0.3", default-features = false, features = ["collect-sysinfo", "probe-http"] }
 ```
 
 See [`config/config.example.toml`](https://github.com/houseme/service-watch/blob/main/config/config.example.toml)

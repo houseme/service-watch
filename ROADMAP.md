@@ -224,7 +224,7 @@
 
 **验收**：单测 —— RFC 4231 向量、路由级覆盖全局、None 不加头；集成 —— 双端点（有 secret / 无 secret）分别验签与裸投递。**已实现（2026-11-18）**：webhook.rs 2 个单测（RFC 4231 TC2 hex 对照 RFC 原文与 openssl 双重核实）+ runtime.rs 路由覆盖单测 + tests/alert_routing.rs 3 个集成测试（验签 stub 服务端重算 HMAC：双格式验签通过/裸投递无头/错签按投递失败）；密钥与签名值不落日志。
 
-### F30 状态页历史迷你图 ☑ (2026-11-18;人工目验待做)
+### F30 状态页历史迷你图 ☑ (2026-11-18;人工目验已完成)
 
 - [x] status_page.html 内嵌零依赖 SVG 迷你图：`/metrics/history` 拉取后绘制 `checks_critical` 与 `recovery_fatal` 折线（escapeHtml 纪律延续 —— 折线坐标全部由 num() 防护后的数字计算，无文本插值；历史为空/接口失败不渲染，fetch 失败不阻塞既有 status/metrics 渲染）
 - [x] 图形无写入口、无外部资源引用（与既有零依赖约束一致）

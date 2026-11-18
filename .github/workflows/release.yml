@@ -1,13 +1,12 @@
-# 发布构建:tag 推送触发,四平台交叉产出二进制压缩包并创建 GitHub Release。
+# 发布构建:tag 推送触发,产出二进制压缩包并创建 GitHub Release。
 #
 # 触发方式:
 #   1. 把根 Cargo.toml [workspace.package].version 改为目标版本(verify-tag 强制一致)
-#   2. git tag v0.2.0 && git push origin v0.2.0
+#   2. git tag vX.Y.Z && git push origin vX.Y.Z
 #
-# 矩阵(与 ci.yml 平台口径一致):
-#   - x86_64-unknown-linux-gnu / aarch64-apple-darwin / x86_64-apple-darwin:
-#     默认 feature + collect-deep-hardware(Linux hwmon、macOS AppleSMC 深度采集;
-#     发布二进制统一带上,省去用户按需重编)。
+# 矩阵(与 ci.yml 平台口径一致;macOS 两平台暂缓,见矩阵内注释):
+#   - x86_64-unknown-linux-gnu:默认 feature + collect-deep-hardware
+#     (Linux hwmon 深度采集;发布二进制统一带上,省去用户按需重编)。
 #   - x86_64-pc-windows-msvc:额外启用 windows-service(F15 agent 自身 SCM 形态)
 #     与 monitor-core/scm-target(原生 Windows Service 目标恢复);TLS 栈为
 #     rustls + aws-lc-rs(reqwest 0.13 无 ring 备选),需 NASM + CMake。
@@ -20,7 +19,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write # gh release create 上传产物
+  contents: read # 默认只读;release 作业按需覆写 write
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,7 +27,7 @@ env:
 jobs:
   verify-tag:
     # tag 必须与 workspace 版本一致:产物 --version 取自 Cargo.toml,
-    # 不一致时先改根 Cargo.toml 再打 tag,避免 v0.2.0 的包内报 0.1.0。
+    # 不一致时先改根 Cargo.toml 再打 tag,避免 tag 名与包内版本错位。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +43,7 @@ jobs:
 
   build:
     needs: verify-tag
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -55,68 +55,30 @@ jobs:
           # (zigbuild/container+SDK13.3)均止于链接期/SDK 依赖,教训链见
           # service-watch-review-round7 记忆 1–7 环。待 macOS runner 恢复后
           # 恢复原生构建 job(此前版本见 git 历史 8a42bfa 之前的矩阵)。
+          # 恢复注意(第十七轮 P2 教训,交叉脚手架已删、勿原样取回):
+          #   - 历史交叉分支里 monitorctl 构建带 `--features collect-sysinfo`
+          #     是幽灵 feature(monitorctl 无此 feature,cargo 直接报错);
+          #   - 第三方 SDK 下载(joseluisq/macosx-sdks)恢复时须加 sha256
+          #     校验后再解包(供应链)。
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             agent_features: windows-service,monitor-core/scm-target,collect-deep-hardware
     runs-on: ${{ matrix.os }}
-    container: ${{ matrix.container || null }}
     steps:
       - uses: actions/checkout@v4
-      # container 内不用 dtolnay action(镜像自带 rustup 但 --force-non-host 参数
-      # 不被旧 rustup 认,且旧 cargo 不认 manifest 新语法):显式 rustup update stable
-      - if: matrix.container == null
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - if: matrix.container != null
-        run: |
-          # 镜像预装 cargo 1.79 不认 edition2024;rustup update 后旧路径可能仍优先,
-          # 显式 default + PATH 校验(失败即早退,便于诊断)
-          rustup update stable --force-non-host 2>/dev/null || rustup update stable
-          rustup default stable
-          rustup target add ${{ matrix.target }}
-          echo "CARGO_HOME=$(dirname $(dirname $(command -v cargo)))" >> "$GITHUB_ENV" || true
-          cargo --version && rustc --version
-      - if: matrix.container != null
-        run: |
-          # P3 防御:rustup default 后确认 cargo ≥1.85(edition2024)
-          v=$(cargo --version | grep -oE '[0-9]+\.[0-9]+')
-          major=${v%%.*}; minor=${v#*.}
-          echo "cargo $v"
-          if [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 85 ]; }; then
-            echo "::error::container cargo $v < 1.85 (edition2024 required); check image tag"
-            exit 1
-          fi
       # aws-lc-sys 构建链依赖;CMake 4 移除 <3.5 兼容,需显式放行(与 ci.yml 同口径)
       - if: runner.os == 'Windows'
         run: choco install -y nasm cmake
       - if: runner.os == 'Windows'
         run: echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV
-      # macOS 交叉 job:自带 macOS SDK 的 cargo-zigbuild 镜像(框架链接必需)
       - name: build
         shell: bash
         run: |
-          # macOS 交叉 job(在自带 macOS SDK 的 container 内):zigbuild +
-          # --no-default-features。镜像自带 SDK 较老,sysinfo 引用的
-          # _kIOMainPortDefault 需 macOS 12+ IOKit 符号 → 下载 macOS 13 SDK 并
-          # SDKROOT 指向(社区标准做法;官方 Apple 下载需认证,这里用
-          # phracker/MacOSX-SDKs 公开镜像)。
-          if [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
-            export MACOSX_DEPLOYMENT_TARGET=12.0
-            if [ ! -d "$HOME/MacOSX13.sdk/usr/include" ]; then
-              curl -sL --retry 5 https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz | tar -xJ -C "$HOME"
-              mv "$HOME/MacOSX13.3.sdk" "$HOME/MacOSX13.sdk"
-            fi
-            export SDKROOT="$HOME/MacOSX13.sdk"
-            cargo zigbuild --release -p monitor-agent --target ${{ matrix.target }} --no-default-features --features "${{ matrix.agent_features }}"
-          else
-            cargo build --release -p monitor-agent --target ${{ matrix.target }} --features "${{ matrix.agent_features }}"
-          fi
-          if [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
-            cargo zigbuild --release -p monitorctl --target ${{ matrix.target }} --no-default-features --features collect-sysinfo
-          else
-            cargo build --release -p monitorctl --target ${{ matrix.target }} --features collect-deep-hardware
-          fi
+          cargo build --release -p monitor-agent --target ${{ matrix.target }} --features "${{ matrix.agent_features }}"
+          cargo build --release -p monitorctl --target ${{ matrix.target }} --features collect-deep-hardware
       - name: stage
         shell: bash
         run: |
@@ -131,7 +93,11 @@ jobs:
             cp "${bin}/monitor-agent" "${bin}/monitorctl" "dist/${pkg}/"
             mkdir -p "dist/${pkg}/deploy"
             cp docs/deploy/systemd/service-watch.service "dist/${pkg}/deploy/"
-            cp docs/deploy/launchd/com.houseme.service-watch.plist "dist/${pkg}/deploy/"
+            # launchd plist 仅随 apple-darwin 产物分发(当前矩阵无 darwin 格,
+            # macOS 恢复后自动带回)。
+            if [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
+              cp docs/deploy/launchd/com.houseme.service-watch.plist "dist/${pkg}/deploy/"
+            fi
           fi
           cp config/config.example.toml "dist/${pkg}/"
           echo "pkg=${pkg}" >> "$GITHUB_ENV"
@@ -154,6 +120,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release create/upload 产物
     steps:
       - uses: actions/download-artifact@v4
         with:

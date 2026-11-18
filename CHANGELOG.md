@@ -3,15 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x 阶段 minor=功能，y.z=修复。
 
-## [0.2.0] — 2026-11-17
+## [Unreleased]
 
-第一个 tag 发布 (v0.2 完成门 PASS 后切版本)。v0.1 + v0.2 + v0.3 可实现项全部交付，详见下方各条目与 ROADMAP。
+### 2026-11-18 第十七轮评审(F36 首跑实弹)P0 修复
 
-
+- [P0] **Windows 服务 `sc stop` 死锁于 STOP_PENDING**:停机 select 的 `REQUEST_NOTIFY.notified()` 分支带 `if REQUESTED` 前置守卫 —— select 驻留时分支被禁用、`notified()` 未注册等待者,`request_shutdown` 的 `notify_one` 只存 permit 不唤醒任务;服务形态无 ctrl_c/eval 等其他唤醒源,runtime 永不进入停机序列(F36 windows-scm 首跑两次实弹复现:STOP_PENDING 60s 超时)。修复:分支恒启用、体内查 `REQUESTED` 过滤残留 permit(unix 与 not(unix) 两分支同构修复);新增 `tests/inprocess_shutdown.rs` 回归(修复前 10.5s 超时红实证咬合)。**注:v0.3.0 已发布产物含此缺陷,修复后需重打 tag 或走 0.3.1。**
 
 ## [0.3.0] — 2026-11-18
 
-v0.4-v0.8 全部功能(F23-F39)与第八~十四轮评审修复。**0.x 阶段 minor=功能**;本版含库 API 破坏性变更(见 v0.7 节注记:`run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret`),故 0.2.0 → 0.3.0。
+v0.4-v0.8 全部功能(F23-F39)与第八~十六轮评审修复(第十五/十六轮:F37 头名折叠/跨表校验、history/journal/spool 路径碰撞守卫、文档全面对坑等,均已随本版交付)。**0.x 阶段 minor=功能**;本版含库 API 破坏性变更(见 v0.7 节注记:`run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret` 与第 5 参 `headers`),故 0.2.0 → 0.3.0。
+
+发布资产仅 Linux x86_64 与 Windows x86_64;macOS 资产暂缓(runner 池枯竭 + 交叉链三方案均不可行,恢复计划见 release.yml 注释)。
+
+## [0.2.0] — 2026-11-17
+
+第一个 tag 发布 (v0.2 完成门 PASS 后切版本)。v0.1 + v0.2 + v0.3 可实现项全部交付，详见下方各条目与 ROADMAP。
 
 ### 2026-11-18 v0.8 功能(可操作性增强)与第十四轮评审修复
 
@@ -28,7 +34,7 @@ v0.4-v0.8 全部功能(F23-F39)与第八~十四轮评审修复。**0.x 阶段 mi
 
 ### 2026-11-18 v0.7 功能 (收尾攻坚) 与第十二轮评审修复
 
-新增 (ROADMAP v0.7，全部默认向后兼容;**注意：库 API 有破坏性变更**,即本版 0.2.0 → 0.3.0 的动因 —— `run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret`):
+新增 (ROADMAP v0.7，全部默认向后兼容;**注意：库 API 有破坏性变更**,即本版 0.2.0 → 0.3.0 的动因 —— `run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret`(F37 再增第 5 参 `headers`)):
 
 - F34 指标推送 HMAC 签名：`[metrics] secret` 配置后推送附 `X-Service-Watch-Signature: sha256=<hex>`(与 F29 webhook 签名同口径);签名 helper 下沉 `alert/signature.rs`(http-client 门控共享层，hmac/sha2 随 http-client 拉入)。
 - F35 journal 查询覆盖轮转上一代：`GET /v1/journal` 当 `journal.1.jsonl` 存在时合并尾读 (gen1 在前，时间序);读失败并入 `truncated=true`(保守口径);monitorctl 零改动。

@@ -91,6 +91,11 @@ static REQUESTED: AtomicBool = AtomicBool::new(false);
 static REQUEST_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
 
 /// 请求 agent 优雅停机 (线程安全;幂等;返回 true = 本次为首个停机请求)。
+///
+/// 唤醒语义约束(第十七轮 P0 教训):消费端 select 的 `notified()` 分支**不得
+/// 加 `if REQUESTED` 前置守卫** —— 分支禁用时 `notified()` 未注册等待者,
+/// `notify_one` 存的 permit 不会唤醒任务,无其他唤醒源即死锁(SCM stop 实弹)。
+/// 正确写法:分支恒启用,体内查 `REQUESTED` 过滤上一轮 run 残留的 permit。
 pub fn request_shutdown() -> bool {
     let first = !REQUESTED.swap(true, Ordering::SeqCst);
     // notify_one 在没有等待者时保留 permit，也允许后续 run 再次被请求停机。
@@ -439,10 +444,18 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
                                 }
                             }
                         }
-                        _ = REQUEST_NOTIFY.get_or_init(tokio::sync::Notify::new).notified(),
-                            if REQUESTED.load(Ordering::SeqCst) => {
-                            tracing::info!("in-process shutdown requested (F15 service stop)");
-                            break StopReason::Clean
+                        // F15 停机请求:notified **不带 if 守卫**(第十七轮 P0:
+                        // 守卫在 REQUESTED=false 时禁用分支 → notified 未注册
+                        // 等待者 → notify_one 只存 permit 不唤醒,Windows 服务
+                        // 形态无其他唤醒源 → select 永不重 poll,SCM stop 死锁
+                        // 于 STOP_PENDING)。permit 恒注册,唤醒后在体内查标志
+                        // 过滤残留 permit(入口已复位)。
+                        _ = REQUEST_NOTIFY.get_or_init(tokio::sync::Notify::new).notified() => {
+                            if REQUESTED.load(Ordering::SeqCst) {
+                                tracing::info!("in-process shutdown requested (F15 service stop)");
+                                break StopReason::Clean
+                            }
+                            // 上一次 run 残留的 permit:标志已复位,吞掉继续等待。
                         }
                     }
                 }
@@ -462,15 +475,23 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
     {
         let stop_reason = tokio::select! {
             reason = async {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {
-                        tracing::info!(signal = "SIGINT", "shutdown signal received");
-                        StopReason::Signal
-                    }
-                    _ = REQUEST_NOTIFY.get_or_init(tokio::sync::Notify::new).notified(),
-                        if REQUESTED.load(Ordering::SeqCst) => {
-                        tracing::info!("in-process shutdown requested (F15 service stop)");
-                        StopReason::Clean
+                loop {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {
+                            tracing::info!(signal = "SIGINT", "shutdown signal received");
+                            break StopReason::Signal
+                        }
+                        // F15 停机请求:同 unix 分支 —— notified 不带 if 守卫
+                        // (第十七轮 P0:守卫禁用分支导致 permit 不唤醒,SCM
+                        // stop 死锁于 STOP_PENDING;F36 首跑实弹证据),体内查
+                        // 标志过滤残留 permit。
+                        _ = REQUEST_NOTIFY.get_or_init(tokio::sync::Notify::new).notified() => {
+                            if REQUESTED.load(Ordering::SeqCst) {
+                                tracing::info!("in-process shutdown requested (F15 service stop)");
+                                break StopReason::Clean
+                            }
+                            // 上一次 run 残留的 permit:标志已复位,吞掉继续等待。
+                        }
                     }
                 }
             } => reason,

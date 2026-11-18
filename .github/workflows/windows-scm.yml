@@ -58,14 +58,19 @@ jobs:
       - run: echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV
         shell: pwsh
       # P2(第十二轮验证):无缓存 release 构建 20min 偏紧 —— rust-cache 兜底。
+      # workspaces 必须锚定仓库根(第十七轮 P2:原 `crates/monitor-agent -> target`
+      # 会把缓存目录解析成 crates/monitor-agent/target —— 虚拟 workspace 下 cargo
+      # 永不写入该目录,target 缓存从不命中,只剩 registry 缓存生效)。
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/monitor-agent -> target
+          workspaces: . -> target
           cache-all-crates: true
 
-      - name: build monitor-agent (默认 feature + windows-service,控制平面随默认 feature 启用)
+      # P3(第十七轮):feature 集与 release.yml Windows 件逐字对齐 —— 演练
+      # 防卫的就是实际发布的二进制形态(此前仅 --features windows-service)。
+      - name: build monitor-agent (same feature set as the release Windows artifact)
         shell: pwsh
-        run: cargo build --release -p monitor-agent --features windows-service
+        run: cargo build --release -p monitor-agent --features windows-service,monitor-core/scm-target,collect-deep-hardware
 
       - name: stage binary + write minimal config.toml
         shell: pwsh
@@ -118,7 +123,7 @@ jobs:
           "SW_DATA=$dataDir" >> $env:GITHUB_ENV
           "SW_CONFIG=$cfgPath" >> $env:GITHUB_ENV
 
-      - name: install via install-service.ps1 (真实安装:New-Service + 失败恢复动作 + Start-Service + /ready 轮询)
+      - name: install via install-service.ps1 (New-Service + failure recovery actions + Start-Service + /ready poll)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -128,7 +133,7 @@ jobs:
           $out | ForEach-Object { Write-Host $_ }
           if ($LASTEXITCODE -ne 0) { throw "install-service.ps1 failed (exit $LASTEXITCODE)" }
 
-      - name: assert service RUNNING + 注册形态 (binPath 带 --service-run;failure 动作 restart/5000)
+      - name: assert service RUNNING + registration shape (binPath has --service-run; failure action restart/5000)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -166,7 +171,7 @@ jobs:
           if (-not $ok) { throw 'GET /health did not return 200 within 30s' }
           Write-Host "/health 200 (attempt $($i + 1))"
 
-      - name: assert 服务模式文件日志 + journal spawn 事务落盘
+      - name: assert service-mode file logging + journal spawn transaction persisted
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -193,7 +198,7 @@ jobs:
           if ($journal -notmatch '"pid_confirmed":true') { throw "journal has spawn_outcome but no successful pid_confirmed:true within 20s: $jr" }
           Write-Host "agent.log $((Get-Item -LiteralPath $log).Length) bytes; journal.jsonl has spawn_intent + spawn_outcome"
 
-      - name: assert 优雅停机 (sc stop → 轮询 STOPPED ≤60s → /health 不再应答 → agent.log 停机标记 reason=Clean)
+      - name: assert graceful shutdown (sc stop → poll STOPPED <=60s → /health down → agent.log stop marker reason=Clean)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -232,7 +237,7 @@ jobs:
           if (-not $orphan) { throw 'supervised child (ping -t) did NOT survive agent exit — Job Object kill-on-close semantics leaked (observer-external contract broken)' }
           Write-Host "supervised child survived agent exit (pid(s): $($orphan.Id -join ',')) — Job Object observer-external contract OK"
 
-      - name: assert 安装幂等 (已存在 fail-fast 守卫 → 先 delete 再 install 的文档化重装路径成功)
+      - name: assert install idempotency (existing-service fail-fast guard → documented delete-then-install path)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -283,7 +288,7 @@ jobs:
           }
           if (-not $ok) { throw 'GET /health not 200 after reinstall (port rebind failed?)' }
 
-      - name: assert 热重载 (POST /v1/reload 增量拓扑 → /status 反映新 check)
+      - name: assert hot reload (POST /v1/reload incremental topology → /status reflects new check)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -321,7 +326,7 @@ jobs:
           if (-not $seen) { throw 'reloaded check did not appear in /status within 20s' }
           Write-Host 'reload applied: added-by-reload visible in /status'
 
-      - name: assert 错误退出恢复 (force-kill → SCM failure action 自动拉起 → /health 恢复)
+      - name: assert crash recovery (force-kill → SCM failure action auto-restart → /health recovered)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -363,7 +368,7 @@ jobs:
           if (-not $ok) { throw 'GET /health not 200 after SCM auto-restart' }
           Write-Host 'crash recovery OK: force kill -> SCM auto-restart -> health 200'
 
-      - name: failure diagnostics (SCM 状态 / qc / 事件日志 / 目录 / 日志尾部 / journal 尾部)
+      - name: failure diagnostics (SCM state / qc / event log / dirs / log tail / journal tail)
         # P3(第十二轮验证):timeout 取消时 failure() 不触发,补 cancelled();
         # dispatcher 前退出的场景只有 SCM System 事件日志可见 (7031/7034/7036)。
         if: failure() || cancelled()
@@ -394,7 +399,7 @@ jobs:
             Get-Content -LiteralPath $jr -Tail 40 | Write-Host
           }
 
-      - name: cleanup (stop → delete → 目录清理;失败路径也执行)
+      - name: cleanup (stop → delete → dir cleanup; runs on failure paths too)
         if: always()
         shell: pwsh
         run: |
