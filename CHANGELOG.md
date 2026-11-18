@@ -3,17 +3,18 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x 阶段 minor=功能，y.z=修复。
 
-## [Unreleased]
-
-### 2026-11-18 第十七轮评审(F36 首跑实弹)P0 修复
-
-- [P0] **Windows 服务 `sc stop` 死锁于 STOP_PENDING**:停机 select 的 `REQUEST_NOTIFY.notified()` 分支带 `if REQUESTED` 前置守卫 —— select 驻留时分支被禁用、`notified()` 未注册等待者,`request_shutdown` 的 `notify_one` 只存 permit 不唤醒任务;服务形态无 ctrl_c/eval 等其他唤醒源,runtime 永不进入停机序列(F36 windows-scm 首跑两次实弹复现:STOP_PENDING 60s 超时)。修复:分支恒启用、体内查 `REQUESTED` 过滤残留 permit(unix 与 not(unix) 两分支同构修复);新增 `tests/inprocess_shutdown.rs` 回归(修复前 10.5s 超时红实证咬合)。**注:v0.3.0 已发布产物含此缺陷,修复后需重打 tag 或走 0.3.1。**
-
 ## [0.3.0] — 2026-11-18
 
 v0.4-v0.8 全部功能(F23-F39)与第八~十六轮评审修复(第十五/十六轮:F37 头名折叠/跨表校验、history/journal/spool 路径碰撞守卫、文档全面对坑等,均已随本版交付)。**0.x 阶段 minor=功能**;本版含库 API 破坏性变更(见 v0.7 节注记:`run_metrics_pusher` 增第 4 参 `secret`、`WebhookNotifier::new` 增第 4 参 `secret` 与第 5 参 `headers`),故 0.2.0 → 0.3.0。
 
 发布资产仅 Linux x86_64 与 Windows x86_64;macOS 资产暂缓(runner 池枯竭 + 交叉链三方案均不可行,恢复计划见 release.yml 注释)。
+
+### 发布修正(2026-11-18 同日重指 tag 重出产物;初版 Windows 件含下述 P0,已覆盖)
+
+- [P0] **Windows 服务 `sc stop` 死锁于 STOP_PENDING**(第十七轮评审,F36 首跑两次实弹复现):停机 select 的 `REQUEST_NOTIFY.notified()` 分支带 `if REQUESTED` 前置守卫 —— select 驻留时分支被禁用、`notified()` 未注册等待者,`request_shutdown` 的 `notify_one` 只存 permit 不唤醒任务;服务形态无 ctrl_c/eval 等其他唤醒源,runtime 永不进入停机序列。修复:分支恒启用、体内查 `REQUESTED` 过滤残留 permit(unix 与 not(unix) 两分支同构);新增 `tests/inprocess_shutdown.rs` 回归(修复前 10.5s 超时红实证咬合)。
+- 服务停机加固(实弹调试追加):`request_shutdown` 先于 StopPending 报告调用;`run_task.await` 加 30s wait-hint 超时兜底(超时 abort 并按受控停止报告 STOPPED —— SCM 契约优先,操作员显式 stop 不触发 failure 重启)。
+- 服务模式文件日志禁用 ANSI(pretty 色码包裹字段值致 `reason=Clean` 断言失配)。
+- 实机验收:windows-scm 演练全绿(SCM 安装/优雅停机/孤儿/热重载/强杀自愈),ROADMAP Windows 实机验收 ☑。
 
 ## [0.2.0] — 2026-11-17
 
