@@ -314,7 +314,7 @@ curl -fsS 'http://127.0.0.1:9170/metrics/history?range=300'
 
 状态页地址为 `http://127.0.0.1:9170/`，Prometheus 抓取地址为 `/metrics?format=prometheus`。`/ready` 表示调度已启动，各目标是否健康通过 `/status` 确认。[控制面与告警语义](RUNBOOK.md)
 
-restart、check、reset 返回 202 表示命令已入队，随后通过 status 和 journal 确认执行结果。Fatal 目标的 restart 返回 409，先处理故障再 reset。silence/unsilence 同样 202 入队：时长越界（0 或超 7 天）与未知目标由 agent 侧拒绝并写审计，静默只抑制 Alert/Escalate/Flap 通知（恢复通知 Resolve 穿透，到点自动过期）。`monitorctl config` 展示 agent 当前持有的生效配置（`GET /v1/config`）：control token 与 webhook 签名密钥以 `***redacted***` 占位（明文不出 agent，该占位不可回灌配置文件），其余字段原样。检查 journal 时可观察 restart、fatal、reset、reset_targets、process_identity、spawn_intent、spawn_outcome 和 audit 事件；`monitorctl journal` 提供经鉴权控制面的尾部查询（含上一代 `journal.1.jsonl` —— gen1 尾部在前、当前文件在后合并，仍不含更早代；更早历史已随轮转覆盖丢弃，直接读盘深查）。
+restart、check、reset 返回 202 表示命令已入队，随后通过 status 和 journal 确认执行结果。Fatal 目标的 restart 返回 409，先处理故障再 reset。silence/unsilence 同样 202 入队：时长越界（0 或超 7 天）与未知目标由 agent 侧拒绝并写审计，静默只抑制 Alert/Escalate/Flap 通知（恢复通知 Resolve 穿透，到点自动过期）。`monitorctl config` 展示 agent 当前持有的生效配置（`GET /v1/config`）：control token 与 webhook 签名密钥以 `***redacted***` 占位（明文不出 agent，该占位不可回灌配置文件），其余字段原样。检查 journal 时可观察 incident、restart、fatal、reset、reset_targets、process_identity、spawn_intent、spawn_outcome 和 audit 事件；`monitorctl journal` 提供经鉴权控制面的尾部查询（含上一代 `journal.1.jsonl` —— gen1 尾部在前、当前文件在后合并，仍不含更早代；更早历史已随轮转覆盖丢弃，直接读盘深查）。
 
 ## 8. 配置热重载
 

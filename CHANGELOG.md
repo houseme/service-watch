@@ -1,13 +1,13 @@
 # Changelog
 
+All notable changes to this project will be documented in this file.
+Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x 阶段 minor=功能，y.z=修复。
+
 ## [0.2.0] — 2026-11-17
 
 第一个 tag 发布 (v0.2 完成门 PASS 后切版本)。v0.1 + v0.2 + v0.3 可实现项全部交付，详见下方各条目与 ROADMAP。
 
 
-
-All notable changes to this project will be documented in this file.
-Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x 阶段 minor=功能，y.z=修复。
 
 ## [Unreleased]
 

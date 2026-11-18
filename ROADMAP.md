@@ -294,7 +294,7 @@
 
 ### F36 Windows runner SCM 实机演练 ☑ (第十二轮验证修复 P1×2/P2×3;第十三轮扩展断言链:Job Object 孤儿存活/POST /v1/reload 热重载/强杀→SCM failure action 自愈，timeout 30min —— CI 首跑绿待 push 后验证) (2026-11-18;作业与文档已落地并通过本地校验 —— YAML 解析 / pwsh 解析器逐 step 语法 / 生成 config 过真 agent `--check-config` / 脚本参数 AST 核对;**「CI 首跑绿」待 push 后首次运行验证**)
 
-- [x] CI 新增 windows-latest 作业 (`.github/workflows/windows-scm.yml`,独立文件、独立 job、timeout 20min，不改变 ci.yml 门禁语义):构建 monitor-agent(windows-service feature，默认 feature 带控制平面)→ 用 docs/deploy/windows/install-service.ps1 **真实安装服务**(`-InstallDir/-ConfigPath/-DataDir/-ServiceName` 参数化，人工用法零改动)→ 服务 RUNNING → `/health` 200 → `sc stop` → 轮询 STOPPED ≤60s 且进程优雅退出 (/health 拒连 + agent.log `reason=Clean`)→ journal/文件日志落盘断言(journal 按 spawn 事务行断言 —— 停机不写专门 journal 行，与实现语义如实对齐)→ 安装幂等断言 (已存在 fail-fast 守卫 + "先 delete 再 install"文档化重装路径含端口重绑)→ 卸载清理 (失败路径 dump 状态/日志/journal 尾部)
+- [x] CI 新增 windows-latest 作业 (`.github/workflows/windows-scm.yml`,独立文件、独立 job、timeout 30min，不改变 ci.yml 门禁语义):构建 monitor-agent(windows-service feature，默认 feature 带控制平面)→ 用 docs/deploy/windows/install-service.ps1 **真实安装服务**(`-InstallDir/-ConfigPath/-DataDir/-ServiceName` 参数化，人工用法零改动)→ 服务 RUNNING → `/health` 200 → `sc stop` → 轮询 STOPPED ≤60s 且进程优雅退出 (/health 拒连 + agent.log `reason=Clean`)→ journal/文件日志落盘断言(journal 按 spawn 事务行断言 —— 停机不写专门 journal 行，与实现语义如实对齐)→ 安装幂等断言 (已存在 fail-fast 守卫 + "先 delete 再 install"文档化重装路径含端口重绑)→ 卸载清理 (失败路径 dump 状态/日志/journal 尾部)
 - [x] 演练即验收证据：把「Windows 实机验收」中的安装/启动/SCM stop/优雅退出自动化(交互式 Job Object console 演练仍属人工)
 
 **验收**：CI 作业全绿 (**待 push 后 CI 首跑验证，未勾**);断言已覆盖安装幂等、SCM 状态迁移、优雅停机、日志与 journal 产出。

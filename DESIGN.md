@@ -68,11 +68,11 @@ service-watch/
 [features]
 default = ["collect-sysinfo", "probe-http", "notify-webhook", "control-http"]
 collect-sysinfo = ["dep:sysinfo"]
-collect-deep-hardware = ["collect-sysinfo"]
-http-client     = ["dep:reqwest"]
+collect-deep-hardware = []
+http-client     = ["dep:reqwest", "dep:hmac", "dep:sha2"]
 probe-http      = ["http-client"]
 notify-webhook  = ["http-client"]
-control-http    = ["dep:axum"]
+control-http    = ["dep:axum", "dep:axum-server", "dep:rustls-pemfile", "dep:rustls"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "signal", "process", "net", "io-util"] }
@@ -117,6 +117,10 @@ json = false                            # 结构化 JSON 输出
 [control]                               # 控制平面 (feature control-http)
 enabled = true
 listen = "127.0.0.1:9170"               # 仅回环;绑定非回环需显式确认
+# token = "change-me"                   # 可选 Bearer 令牌 (F23;除 /health 外全部端点)
+# tls_cert = "/etc/sw/tls.crt"          # 可选 HTTPS (F32;成对)
+# tls_key = "/etc/sw/tls.key"
+# client_ca_cert = "/etc/sw/ca.crt"     # 可选 mTLS (F38;必须与 tls 成对)
 
 [collect]
 interval = "5s"                         # 全局采集间隔
@@ -133,6 +137,7 @@ flap_window = "30m"                     # flap 检测窗口
 flap_threshold = 5                      # 窗口内 open/close 次数达到即抑制
 deadman_url = ""                        # 可选心跳 POST;失败仅记日志
 # webhook_secret = "change-me"          # 可选 HMAC 签名密钥 (F29);缺省 (不写) = 不签名;
+# headers = { Authorization = "Bearer x" }  # 可选自定义投递头 (F37;token 名/可见 ASCII 值)
 #                                       #   显式空白值被校验拒绝 (与 webhook_url 的 ""→None 语义不同)
 
 # ---- 按目标告警路由 (F26，可多个) ----
@@ -158,6 +163,8 @@ enabled = false                         #   JSON;失败即放弃 (下轮覆盖);
 url = ""                                # 空 = 仅 /metrics 端点暴露
 interval = "60s"
 timeout = "10s"                         # 单次推送超时;timeout < interval 校验
+# secret = "change-me"                  # 可选推送签名 (F34)
+# history_path = "./data/metrics.jsonl" # 可选历史持久化 (F39;10 MiB 单代轮转)
 
 # ---- 检查目标 (可多个) ----
 [[check]]
@@ -228,6 +235,7 @@ pidfile = "/run/nginx.pid"              # 或 pid = 1234
 4. supervise:`command` 非空;`backoff_initial ≤ backoff_max`;`startup_grace ≥ min_uptime`;check 名称引用存在。
 5. `hung_action = "activate"` 时必须配置 `[service.activate]`，钩子的 command/url 必须且只能配置一个，command 非空，URL 使用 http/https。
 6. check/service/watch 各自名称唯一且非空，`data_dir` 非空并可创建，告警阈值至少 1，webhook/deadman URL 使用 http/https。缺省 agent 与空 `[agent]` 均使用 `./data`。`[[alert.routes]]` 的 `match` 非空白、`url` scheme 为 http/https (F26)。`webhook_secret` 与路由级 `secret` 不得为纯空白 (F29)。
+8. F37 头名 RFC 7230 token、值仅可见 ASCII+TAB 且非空 (与 http crate 字节规则对齐);表内/跨表仅大小写不同的头名拒绝;F34 `[metrics] secret` 非空白;F38 `client_ca_cert` 必须与 `tls_cert/tls_key` 同配;F39 `history_path` 非空且不得与 journal/spool 系统文件相同;`alert.retries ≤ 100`;`[[watch]] pidfile` 非空路径。
 7. `[[maintenance]]`(F31):`targets` 非空 (显式 `["*"]` 表示全部)、`start_utc` 为两位 `HH:MM`(HH < 24、MM < 60)、`duration` ≥ 60s、`days` 仅 `mon tue wed thu fri sat sun`(大小写不敏感);name 可空 (审计报 targets)。
 
 ## 5. 数据模型

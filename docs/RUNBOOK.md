@@ -72,7 +72,7 @@ monitorctl watch --json | jq 'select(.targets[] | .health == "critical")'   # �
 monitorctl watch --exit-on-error                    # 脚本/短生命周期调用(不可达即退 4)
 ```
 
-## 1.2c 指标周期推送 ([metrics])
+### 1.2c 指标周期推送 ([metrics])
 
 ```toml
 [metrics]
@@ -89,7 +89,7 @@ timeout = "10s"
 = 实际发送的 body 字节 (与 webhook 签名同款口径，验签方法见 §3.4);密钥不落日志。
 抓取器更推荐拉模式：`GET /metrics?format=prometheus`。
 
-## 1.2d 控制面 HTTPS (F32)
+### 1.2d 控制面 HTTPS (F32)
 
 `[control]` 配 `tls_cert` + `tls_key`(PEM 路径，**成对必填**,单边配置被拒绝)
 后，控制面以纯 HTTPS 监听同一 `listen` 地址;未配置 = 纯 HTTP(行为不变)。
@@ -562,8 +562,8 @@ fresh 窗口)。
   合并语义 = **路由级同名键覆盖全局**(默认通道用全局表);自定义头与签名头
   (F29) 独立共存 —— 签名头总是附加,不因同名自定义头丢弃;**不要自定义保留头**
   `X-Service-Watch-Signature`(会产生两个同名头,多数接收端取第一个或拒绝)。
-  注入面校验 (配置层拒绝,退出码 1):头名必须为非空 RFC 7230 token,值不得为空
-  或含 CR/LF/控制字符。slack/json 两格式与 spool 重放同路径生效;头值可能是
+  注入面校验 (配置层拒绝,退出码 1):头名必须为非空 RFC 7230 token,值不得为空、
+  仅可见 ASCII 与 TAB (CR/LF 及其余控制字符拒绝;线上头名归一为小写)。slack/json 两格式与 spool 重放同路径生效;头值可能是
   敏感 token,只进请求头,不落日志/审计。
 
 ## 4. 健康检查端点 (DESIGN §9.2)
@@ -637,6 +637,7 @@ Prometheus 文本 (`--prom` / `?format=prometheus`) 与 JSON 字段同名 (前�
 │  └─ 在跑但连不上：
 │      ├─ [control].enabled = false?         → 开启并重启 agent
 │      ├─ listen 与 monitorctl --url 不一致  → 对齐
+│      ├─ HTTPS/mTLS 失败 (exit 4 连接错误)  → agent 配了 tls_cert/client_ca_cert 而本端证书不受信/缺失?按 §1.2d/§1.2e 核对信任链与 --client-cert/--client-key;先查证书有效期
 │      ├─ HTTP 401 (F23 鉴权开启)            → monitorctl 加 --token 或设
 │      │                                        SERVICE_WATCH_TOKEN;/health 恒免鉴权
 │      └─ 防火墙 (仅当 listen 改为非回环)    → 收回环或按需放行 (可选 Bearer 令牌：
