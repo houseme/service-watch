@@ -83,10 +83,10 @@ pub async fn execute(check: &CheckCfg, ctx: ProbeCtx<'_>) -> ProbeResult {
             }
         }
         CheckKindCfg::Process {
-            process,
             cpu_threshold,
             mem_threshold_mb,
-        } => run_process_check(process, *cpu_threshold, *mem_threshold_mb, ctx),
+            ..
+        } => run_process_check(*cpu_threshold, *mem_threshold_mb, ctx),
     }
 }
 
@@ -137,12 +137,10 @@ async fn run_http(
 }
 
 fn run_process_check(
-    process: &str,
     cpu_threshold: Option<f32>,
     mem_threshold_mb: Option<u64>,
     ctx: ProbeCtx<'_>,
 ) -> ProbeResult {
-    let _ = process; // 名称解析由 eval 完成，这里只消费已解析身份
     let Some(snap) = ctx.process_snapshot else {
         return ProbeResult::Fail {
             reason: "process not found in latest snapshot".into(),

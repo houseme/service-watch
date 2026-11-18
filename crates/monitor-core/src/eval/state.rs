@@ -15,15 +15,6 @@ pub struct Thresholds {
     pub success_threshold: u32,
 }
 
-impl Default for Thresholds {
-    fn default() -> Self {
-        Self {
-            failure_threshold: 3,
-            success_threshold: 2,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct CheckStateMachine {
     thresholds: Thresholds,

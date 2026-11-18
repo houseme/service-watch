@@ -49,8 +49,15 @@ mod tempfile_guard {
 /// 用真实 journal writer 写入「上一次会话」的 open incident:
 /// Alert(Warning) → Escalate(Critical),无配对 Resolve。
 async fn write_previous_session_journal(path: &std::path::Path) {
-    let (tx, rx) = mpsc::channel(16);
-    let writer = tokio::spawn(journal::run_writer(path.to_path_buf(), rx));
+    let (tx, rx) = journal::channel(16);
+    let file = journal::open_writer(path).expect("open journal");
+    let writer = tokio::spawn(journal::run_tracked_writer_with_limit(
+        file,
+        path.to_path_buf(),
+        rx,
+        tx.counters().clone(),
+        0,
+    ));
     let t = SystemTime::now();
     let key = AlertEvent::incident_key(TARGET, TARGET);
     tx.try_send(JournalEvent::Incident {
@@ -125,8 +132,16 @@ async fn spawn_agent(cfg: Config, replayed: JournalState) -> Harness {
             }
         });
     }
-    let (journal_tx, journal_rx) = mpsc::channel(64);
-    tokio::spawn(journal::run_writer(tmp.0.join("journal.jsonl"), journal_rx));
+    let (journal_tx, journal_rx) = journal::channel(64);
+    let journal_path = tmp.0.join("journal.jsonl");
+    let journal_file = journal::open_writer(&journal_path).expect("open journal");
+    tokio::spawn(journal::run_tracked_writer_with_limit(
+        journal_file,
+        journal_path,
+        journal_rx,
+        journal_tx.counters().clone(),
+        0,
+    ));
     let (cmd_tx, cmd_rx) = mpsc::channel(4);
     drop(cmd_tx); // 控制平面未启用
     let (metrics_tx, metrics_rx) = watch::channel(Arc::new(
@@ -143,7 +158,7 @@ async fn spawn_agent(cfg: Config, replayed: JournalState) -> Harness {
         snapshot_rx: snap_rx,
         alert: queue.clone(),
         watched,
-        journal_tx: journal_tx.into(),
+        journal_tx,
         control_rx: cmd_rx,
         status_tx,
         metrics_tx,
@@ -225,7 +240,7 @@ async fn open_incident_restored_renotified_resolved_and_realerted() {
     write_previous_session_journal(&journal_path).await;
 
     // ---- 真实重放:open incident 进入重放态 ----
-    let replayed = journal::replay(&journal_path);
+    let replayed = journal::replay_checked(&journal_path).unwrap_or_default();
     let key = AlertEvent::incident_key(TARGET, TARGET);
     let restored = replayed
         .open_incidents

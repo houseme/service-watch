@@ -123,7 +123,7 @@
 
 ---
 
-## v0.2.x — 加固与运维化 ◐
+## v0.2.x — 加固与运维化 ☑
 
 - [x] **F12 告警 spool 落盘 (at-least-once)**:投递失败的事件持久化到 spool 目录 (`{data_dir}/spool/pending.jsonl`),恢复后重放 (启动重放 + 周期重放);上限与过期策略 (`SPOOL_MAX_AGE` 7d、批量 16/次)—— 集成测试断言 at-least-once 闭环
 - [x] **F13 Prometheus /metrics 文本格式**:与 JSON 并存 (`?format=prometheus` / `Accept: text/plain`);eval 每轮发布真实运行指标 (探测执行/跳过、恢复状态分布、降级事件、健康分布、uptime)—— 2026-11-11 完成，E2E 实测
@@ -142,7 +142,7 @@
 
 ---
 
-## v0.4.x — 可信边界与运维闭环 ◐ (2026-11-18 规划)
+## v0.4.x — 可信边界与运维闭环 ☑ (2026-11-18 规划并交付;第九轮双专家验证收口)
 
 目标：补齐 0.x 阶段的信任边界、journal 生命周期与告警路由缺口。**全部默认行为向后兼容**（不配置新字段 = 行为不变）。
 门禁：与 v0.3 相同 —— fmt / clippy -D warnings / 全测 / 两条 no-default 组合 + `scm-target` 交叉编译；文档（README / DESIGN / RUNBOOK / DEPLOYMENT / example 注释）随实现同步。
@@ -164,7 +164,7 @@
 - [x] 重放顺序：`journal.1.jsonl` 存在时按 `journal.1 → journal.jsonl` 依次重放（Fatal 闩锁/预算/未决 SpawnIntent 跨轮转保持 —— "Fatal 跨重启保持" 契约不因轮转破洞）
 - [x] 改名失败的降级路径：保留当前文件继续写 + WARN（不停机；体积上限是运维目标不是安全边界；不触发持久化故障闩锁）
 
-**验收**：单测 —— 超限触发轮转、journal.1 生成且当前文件续写、audit 落盘、二次轮转覆盖旧 journal.1；集成级 —— Fatal 写入后轮转再重启仍 Fatal；轮转文件内的未决 SpawnIntent 仍阻塞同名冷启动；`journal_max_size = 0` 完全不轮转。**已实现（2026-11-18）**：以上全部有单测锁定（journal.rs 7 个 F24 测试，含轮转失败降级与轮转后坏行隔离不回归）；产品写入口为 `run_tracked_writer_with_limit`（runtime 传入 `cfg.agent.journal_max_size`），4 参 `run_tracked_writer` 保持兼容签名不轮转（eval 既有调用方零改动）。
+**验收**：单测 —— 超限触发轮转、journal.1 生成且当前文件续写、audit 落盘、二次轮转覆盖旧 journal.1；集成级 —— Fatal 写入后轮转再重启仍 Fatal；轮转文件内的未决 SpawnIntent 仍阻塞同名冷启动；`journal_max_size = 0` 完全不轮转。**已实现（2026-11-18）**：以上全部有单测锁定（journal.rs 7 个 F24 测试，含轮转失败降级与轮转后坏行隔离不回归）；写入口统一为 `run_tracked_writer_with_limit`（runtime 传入 `cfg.agent.journal_max_size`；第十八轮精简删除了仅测试使用的 4 参兼容包装与裸事件 `run_writer`/Untracked 通道层）。
 
 ### F25 incident 跨重启恢复与重通知 ☑ (2026-11-18;第九轮验证：主链路正确，`__recover__` 合成 incident 闭门修复 + 单测)
 
@@ -189,12 +189,12 @@
 
 ### v0.4 遗留人工项（非代码，持续跟踪）
 
-- [ ] **Windows 实机验收**（沿用 v0.2 条目）：安装、SCM stop、错误退出恢复、Job Object 演练；交叉编译只提供类型证据
+- [x] **Windows 实机验收**（沿用 v0.2 条目）：安装、SCM stop、错误退出恢复、Job Object 演练 —— 已由 F36 windows-scm CI 演练自动化并连续全绿（2026-11-18，详见文末「后续验收与扩展」对应行）；交互式 console 演练与生产长周期观察仍属人工（见 v0.7 遗留行）
 - [ ] **硬件实机覆盖**（沿用 v0.2 条目）：Linux hwmon 设备与更多 Intel/Apple Silicon 机型读数证据 —— **Apple Silicon 部分已采集（2026-11-18 本机 darwin arm64 实测，见 F21 验收行补记）**;Linux hwmon 与 Intel 平台仍需真机
 
 ---
 
-## v0.5.x — 运维降噪与可观测出口 ◐ (2026-11-18 规划)
+## v0.5.x — 运维降噪与可观测出口 ☑ (2026-11-18 规划并交付;第十轮双专家验证收口)
 
 目标：把「部署期静默」「事后查证」「投递可验证」「状态页可读」四件运维高频事做成产品能力。**全部默认向后兼容**（不配置新字段 = 行为不变）。
 门禁：与 v0.4 相同 —— fmt / clippy -D warnings / 全测 / 两条 no-default 组合；文档随实现同步。
@@ -222,7 +222,7 @@
 - [x] 每次投递附 `X-Service-Watch-Signature: sha256=<hex hmac-sha256(body)>`；RFC 4231 已知向量单测；集成测试 stub 端实算验签
 - [x] 签名覆盖 slack 与 json 两种格式的最终 body；spool 重放同样签名
 
-**验收**：单测 —— RFC 4231 向量、路由级覆盖全局、None 不加头；集成 —— 双端点（有 secret / 无 secret）分别验签与裸投递。**已实现（2026-11-18）**：webhook.rs 2 个单测（RFC 4231 TC2 hex 对照 RFC 原文与 openssl 双重核实）+ runtime.rs 路由覆盖单测 + tests/alert_routing.rs 3 个集成测试（验签 stub 服务端重算 HMAC：双格式验签通过/裸投递无头/错签按投递失败）；密钥与签名值不落日志。
+**验收**：单测 —— RFC 4231 向量、路由级覆盖全局、None 不加头；集成 —— 双端点（有 secret / 无 secret）分别验签与裸投递。**已实现（2026-11-18）**：signature.rs 单测（RFC 4231 TC2 hex 对照 RFC 原文与 openssl 双重核实；webhook 侧原委托方法的重复断言已随第十八轮精简并入）+ runtime.rs 路由覆盖单测 + tests/alert_routing.rs 3 个集成测试（验签 stub 服务端重算 HMAC：双格式验签通过/裸投递无头/错签按投递失败）；密钥与签名值不落日志。
 
 ### F30 状态页历史迷你图 ☑ (2026-11-18;人工目验已完成)
 
@@ -266,13 +266,15 @@
 
 ### v0.6 遗留人工项（非代码，持续跟踪）
 
-- [ ] **Windows 实机验收**（沿用）；**硬件实机覆盖**（沿用）；~~F30 状态页人工目验~~（✅ 2026-11-18 浏览器实测完成，见 F30 验收行）
+- [x] **Windows 实机验收**（沿用）—— F36 windows-scm CI 演练全绿（2026-11-18，剩余人工部分见 v0.7 遗留行）
+- [ ] **硬件实机覆盖**（沿用）—— Linux hwmon/Intel 待真机（Apple Silicon 已采，见 F21 验收行）
+- ~~F30 状态页人工目验~~（✅ 2026-11-18 浏览器实测完成，见 F30 验收行）
 
 ---
 
 ---
 
-## v0.7.x — 收尾攻坚 ◐ (2026-11-18 规划)
+## v0.7.x — 收尾攻坚 ☑ (2026-11-18 规划并交付;第十二/十三轮验证收口)
 
 目标：清偿显式留白的 backlog，并把两个人工验收项中**可自动化的部分**搬进流水线。**全部默认向后兼容**。
 门禁：与 v0.6 相同 —— fmt / clippy -D warnings / 全测 / 两条 no-default 组合；文档随实现同步。
@@ -290,7 +292,7 @@
 - [x] `GET /v1/journal` 当 `journal.1.jsonl` 存在时一并尾读 (gen1 尾部在前 + 当前文件尾部在后 —— journal 追加写 = 时间顺序，合并后统一坏行隔离/过滤/tail 截断;每文件独立 512KB 有界读，合并至多 1MB);`truncated` = 任一文件字节截断 或 合并命中总数 > tail;单文件读失败只放弃该文件 (WARN),不毒化另一代;上一代 NotFound 行为与单文件时代一致;文档 (DESIGN §9.2 / RUNBOOK §1 表 + §2.2 / DEPLOYMENT §7) 从「仅当前文件」改为「含上一代 (仍不含更早代 —— F24 只保留一代)」
 - [x] monitorctl 无需变更 (端点响应 schema `{"truncated","lines"}` 与行 schema 不变，gen1 行只是同 schema 的追加行;确认方式:monitorctl `JournalReply` 解析与 `fetch_journal_reply` 路径零改动 —— 端点对客户端透明)
 
-**验收**(2026-11-18 已跑，通过)：单测 —— `journal_tail_lines_merges_gen1_before_current`(合并顺序 gen1→当前、双文件坏行隔离、target/since 跨两代过滤、tail 按合并命中数截断)、`journal_tail_lines_truncated_by_bytes_from_either_generation`(gen1 超 512KB → truncated 置位且当前文件数据完整)、`gen1_query_path_matches_rotation_naming`(查询侧上一代路径推导与 F24 轮转命名同规则);既有 `journal_tail_lines_filters_and_truncates` 锁定无 gen1 时行为与现状一致;端点 × F24 轮转联动 `journal_endpoint_reads_rotated_previous_generation`(产品 tracked writer 阈值触发真实轮转 → `GET /v1/journal` 查到上一代尾部哨兵事件，且 gen1 事件先于轮转 audit 与当前文件事件)。
+**验收**(2026-11-18 已跑，通过)：单测 —— `journal_tail_lines_merges_gen1_before_current`(合并顺序 gen1→当前、双文件坏行隔离、target/since 跨两代过滤、tail 按合并命中数截断)、`journal_tail_lines_truncated_by_bytes_from_either_generation`(gen1 超 512KB → truncated 置位且当前文件数据完整;查询侧上一代路径经 `recover::journal::gen1_path` 单一事实源推导,与 F24 轮转命名同规则 —— 第十八轮精简删除了仅转发的 `gen1_query_path` 包装及其对拍测试);既有 `journal_tail_lines_filters_and_truncates` 锁定无 gen1 时行为与现状一致;端点 × F24 轮转联动 `journal_endpoint_reads_rotated_previous_generation`(产品 tracked writer 阈值触发真实轮转 → `GET /v1/journal` 查到上一代尾部哨兵事件，且 gen1 事件先于轮转 audit 与当前文件事件)。
 
 ### F36 Windows runner SCM 实机演练 ☑ (第十二轮验证修复 P1×2/P2×3;第十三轮扩展断言链:Job Object 孤儿存活/POST /v1/reload 热重载/强杀→SCM failure action 自愈，timeout 30min —— CI 首跑绿待 push 后验证) (2026-11-18;作业与文档已落地并通过本地校验 —— YAML 解析 / pwsh 解析器逐 step 语法 / 生成 config 过真 agent `--check-config` / 脚本参数 AST 核对;**「CI 首跑绿」待 push 后首次运行验证**)
 
@@ -322,8 +324,6 @@
 
 ### F38 控制面 mTLS ☑ (2026-11-18;**实现侧偏差**:服务端 verifier 需 rustls crate 本体类型 (WebPkiClientVerifier/RootCertStore/ServerConfig,axum-server/reqwest/rustls-pemfile 均无公开 re-export),workspace + monitor-core(control-http feature) 新增 rustls 直接依赖 —— `default-features = false, features = ["std","tls12"]`,provider 经 builder_with_provider 显式传入不 install_default,aws-lc-rs 由 axum-server/reqwest feature 合并提供，不新增编译单元)
 
-### F38 控制面 mTLS ☑ (2026-11-18;**实现侧偏差**:服务端 verifier 需 rustls crate 本体类型 (WebPkiClientVerifier/RootCertStore/ServerConfig,axum-server/reqwest/rustls-pemfile 均无公开 re-export),workspace + monitor-core(control-http feature) 新增 rustls 直接依赖 —— `default-features = false, features = ["std","tls12"]`,provider 经 builder_with_provider 显式传入不 install_default,aws-lc-rs 由 axum-server/reqwest feature 合并提供，不新增编译单元)
-
 - [x] `[control] client_ca_cert`(可选，PEM;字段与单配校验由主会话交付于 config.rs):配置后 TLS 握手要求客户端证书 (由该 CA 签发),无证书/不可信证书握手失败 (连接错误，无 HTTP 层交互);必须与 tls_cert/tls_key 同配 (config 校验拒绝单配，`load_tls_config` 程序化兜底 `Err(Config)`)
 - [x] rustls WebPkiClientVerifier (严格 webpki 校验，不 allow_untrusted/unauthenticated;`builder_with_provider` 显式传 provider) + axum-server `RustlsConfig::from_config`(该构造不代设 ALPN，手工补齐 h2/http/1.1);CA PEM 严格解析 (任一段失败即拒，空文件/无证书段 → 装配期早退，与 F32 同列，退出码 2);monitorctl `--client-cert/--client-key`(成对，单边启动错误) 经 `reqwest::Identity::from_pem` (0.13 rustls 后端唯一 PEM 入口;`from_pkcs8_pem` 仅 native-tls 提供) 全命令共用 (OnceLock 注入 build_client,cmd_* 签名零改动)
 - [x] 文档：DESIGN §9.2.2 (mTLS 语义 + 信任链三件套 TLS+Bearer+mTLS 可叠加 —— 鉴权中间件仍在 TLS 层之后，401 语义不变，mTLS 失败到不了 HTTP 层);RUNBOOK §1.2e (client_ca_cert 配置 + openssl CA/客户端证书生成 + monitorctl 用法 + `--insecure` 与 mTLS 的正交语义);DEPLOYMENT control 段 + 速查表 mTLS 行
@@ -336,7 +336,7 @@
 - [x] 独立 writer 任务 (`metrics_history` 顶层模块) 消费 metrics watch (eval 零改动、不阻塞单写者;watch 滞后时中间样本被最新值覆盖，首样本照写);重启追加不截断 (append+create);停机 abort+await 位于 metrics pusher 收口之后、journal drop 之前
 - [x] 重放/查询不做 (纯数据出口，分析走 jq/外部工具)—— 文档明示 (DESIGN §10、RUNBOOK §1.2f、DEPLOYMENT metrics 段)
 
-**验收** (2026-11-18 已跑，通过)：单测 (src/metrics_history.rs,4 测试) —— 轮转 (小阈值，`.1` 只保留一代且内容为最新样本)/续写/禁用轮转 (max_size=0)/重启追加 (两次会话写同一文件);**「坏行隔离」不适用** —— 单写者整行追加、无读回放路径 (打开时亦不做 journal 式半行定界，模块 doc 注明崩溃中途残行概率极低，分析侧容忍);集成 (tests/metrics_history.rs,2 测试，经 metrics watch 通道直接喂样本) —— 产品入口落盘逐行行格式与 `/metrics/history` 样本对象一致 (report 逐字段一致、at 单调)、小阈值轮转 `.1` 保留最新一代;`history_path` 消费无 feature 门控 (三 no-default 组合 check 通过)。
+**验收** (2026-11-18 已跑，通过)：单测 (src/metrics_history.rs,4 测试) —— 轮转 (小阈值，`.1` 只保留一代且内容为最新样本)/续写/禁用轮转 (max_size=0)/重启追加 (两次会话写同一文件);**「坏行隔离」不适用 (无读回放路径)** —— 单写者整行追加;打开时**做**半行定界 (第十四轮 P3 修复：崩溃落在 write_all 中途的残行以补 `\n` 定界，爆炸半径压回 1 行，模块 doc 与 [`open_history_file`] 如实记录);集成 (tests/metrics_history.rs,2 测试，经 metrics watch 通道直接喂样本) —— 产品入口落盘逐行行格式与 `/metrics/history` 样本对象一致 (report 逐字段一致、at 单调)、小阈值轮转 `.1` 保留最新一代;`history_path` 消费无 feature 门控 (三 no-default 组合 check 通过)。
 
 ---
 

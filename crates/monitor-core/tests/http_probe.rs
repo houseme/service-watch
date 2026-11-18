@@ -106,7 +106,7 @@ async fn spawn_scheduler(
             }
         });
     }
-    let (journal_tx, _journal_rx) = mpsc::channel(64); // 接收端持有不消费 (测试不落盘)
+    let (journal_tx, _journal_rx) = monitor_core::recover::journal::channel(64); // 接收端持有不消费 (测试不落盘)
     let (cmd_tx, cmd_rx) = mpsc::channel(4);
     drop(cmd_tx); // 无控制平面
     let (metrics_tx, metrics_rx) = watch::channel(Arc::new(
@@ -123,7 +123,7 @@ async fn spawn_scheduler(
         snapshot_rx: snap_rx,
         alert: queue.clone(),
         watched,
-        journal_tx: journal_tx.into(),
+        journal_tx,
         control_rx: cmd_rx,
         status_tx,
         metrics_tx: metrics_tx.clone(),

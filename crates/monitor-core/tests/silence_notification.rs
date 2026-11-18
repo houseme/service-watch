@@ -170,13 +170,13 @@ async fn silence_suppresses_webhook_resolve_penetrates_and_unsilence_restores() 
             }
         });
     }
-    let (journal_tx, mut journal_rx) = mpsc::channel(256);
+    let (journal_tx, mut journal_rx) = monitor_core::recover::journal::channel(256);
     let journal_events: Arc<Mutex<Vec<JournalEvent>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let journal_events = journal_events.clone();
         tokio::spawn(async move {
-            while let Some(ev) = journal_rx.recv().await {
-                journal_events.lock().unwrap().push(ev);
+            while let Some(req) = journal_rx.recv().await {
+                journal_events.lock().unwrap().push(req.event);
             }
         });
     }
@@ -193,7 +193,7 @@ async fn silence_suppresses_webhook_resolve_penetrates_and_unsilence_restores() 
         snapshot_rx: snap_rx,
         alert: queue.clone(),
         watched,
-        journal_tx: journal_tx.into(),
+        journal_tx,
         control_rx: cmd_rx,
         status_tx,
         metrics_tx,

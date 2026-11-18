@@ -108,14 +108,6 @@ impl WebhookNotifier {
                 .unwrap_or_else(|_| serde_json::json!({"error": "serialize"})),
         }
     }
-
-    /// F29:待附签名头 (`sha256=<hex 小写>`);密钥未配置 → None，请求不带
-    /// 签名头。F34:委托共享实现 ([`super::signature::signature_header`]),
-    /// 本地只保留方法形态供既有单测/调用点零变化。
-    #[cfg(feature = "notify-webhook")]
-    fn signature_header(&self, body: &[u8]) -> Option<(&'static str, String)> {
-        super::signature::signature_header(self.secret.as_deref(), body)
-    }
 }
 
 #[async_trait]
@@ -141,7 +133,9 @@ impl crate::alert::Notifier for WebhookNotifier {
         // 签名值与密钥都只进请求头，不进任何 tracing 字段;签名随 notify-webhook
         // feature 门控，关闭组合下本段整体不参与编译 (request 无需 mut)。
         #[cfg(feature = "notify-webhook")]
-        let request = if let Some((name, value)) = self.signature_header(&body_bytes) {
+        let request = if let Some((name, value)) =
+            super::signature::signature_header(self.secret.as_deref(), &body_bytes)
+        {
             request.header(name, value)
         } else {
             request
@@ -244,33 +238,6 @@ mod tests {
         assert_eq!(body["reason"].as_str(), Some("connection refused"));
     }
 
-    // ---- F29:HMAC-SHA256 签名 (F34 起实现下沉 super::signature,RFC 4231
-    // 向量测试随共享 helper;此处经委托方法锁定 webhook 侧口径不变) ----
-
-    /// 密钥未配置 → 不产生签名头 (裸投递);配置后 → 头名与 `sha256=` 前缀。
-    #[cfg(feature = "notify-webhook")]
-    #[test]
-    fn signature_header_absent_without_secret() {
-        let unsigned = notifier(WebhookFormat::Json);
-        assert!(
-            unsigned.signature_header(b"body").is_none(),
-            "None 密钥不加签名头"
-        );
-        let signed = WebhookNotifier::new(
-            url::Url::parse("http://127.0.0.1:1/hook").unwrap(),
-            WebhookFormat::Json,
-            Duration::from_millis(200),
-            Some("Jefe".into()),
-            std::collections::BTreeMap::new(),
-        )
-        .unwrap();
-        let (name, value) = signed
-            .signature_header(b"what do ya want for nothing?")
-            .unwrap();
-        assert_eq!(name, "X-Service-Watch-Signature");
-        assert_eq!(
-            value,
-            "sha256=5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
-    }
+    // ---- F29:HMAC-SHA256 签名:实现与 RFC 4231 向量测试均在 super::signature
+    // (F34 下沉);端到端签名投递由 tests/alert_routing.rs 集成锁定 ----
 }

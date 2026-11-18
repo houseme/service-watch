@@ -20,9 +20,11 @@
 //!
 //! ## 文件与轮转 (复用 journal F24 单代模式)
 //! - 打开模式 append+create (重启追加);单写者整行写入，写入段无 await 点 ——
-//!   runtime 停机 abort 只落在 `changed().await`，不会截断半行 (打开时也**不做**
-//!   journal 式半行定界：进程崩溃恰好落在 write_all 中途才可能产生残行，
-//!   概率极低，分析侧容忍即可);
+//!   runtime 停机 abort 只落在 `changed().await`，不会截断半行。Open-time
+//!   half-line delimiting IS performed (same as journal `open_writer`, round-14
+//!   P3): a crash landing mid-`write_all` leaves a partial line, and appending
+//!   after restart would glue the next sample to it — a trailing `\n` bounds the
+//!   blast radius to that one line (see [`open_history_file`]).
 //! - 轮转 = 写**后**实测当前文件尺寸 (与 journal F24 同款：内核实测天然兼容
 //!   外部 truncate)，超 [`HISTORY_ROTATE_THRESHOLD`] (10 MiB) → 改名 `.1`
 //!   (只保留一代，二次轮转覆盖)，gen1 路径复用 [`crate::recover::journal::

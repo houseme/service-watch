@@ -396,14 +396,6 @@ pub(crate) async fn bind_and_serve(
     }
 }
 
-/// feature 关闭时的占位：控制平面不可用，调用即返回错误 (不 panic)。
-#[cfg(not(feature = "control-http"))]
-pub async fn serve(_listen: SocketAddr, _shared: Arc<ControlShared>) -> Result<()> {
-    Err(crate::error::CoreError::Control(
-        "control-http feature is disabled".into(),
-    ))
-}
-
 /// axum Router(axum 0.8 路由语法:`{target}`,非 `:target`)。
 ///
 /// F23:路由拆成两个子 Router —— `public` 仅含 `GET /health`(守护进程/负载
@@ -556,43 +548,16 @@ async fn status(State(shared): State<Arc<ControlShared>>) -> Json<StatusReport> 
     Json((*report).clone())
 }
 
-/// 合并三路指标来源 (alert 计数器 / eval watch / uptime 推导)。
+/// 合并两路指标来源:eval watch 报告为基座,仅覆盖 alert 管道三字段。
+/// 以 eval 报告为基座使新增 MetricsReport 字段自动透传,不再需要逐字段拷贝
+/// (反向基座正是第九轮 P2 漏拷 uptime 的根因);F18 环形缓冲句柄亦随基座携带。
 #[cfg(feature = "control-http")]
 fn merged_metrics(shared: &ControlShared) -> MetricsReport {
-    let mut report = shared.alert_counters.to_metrics();
-    let latest = shared.metrics_rx.borrow().clone();
-    report.probe_executed = latest.probe_executed;
-    report.probe_skipped = latest.probe_skipped;
-    report.journal_dropped = latest.journal_dropped;
-    report.journal_write_failures = latest.journal_write_failures;
-    report.journal_write_successes = latest.journal_write_successes;
-    report.journal_critical_failures = latest.journal_critical_failures;
-    report.restarts_total = latest.restarts_total;
-    report.state_transitions_total = latest.state_transitions_total;
-    report.fatal_targets = latest.fatal_targets;
-    report.degradations_current = latest.degradations_current;
-    report.degradations_events = latest.degradations_events;
-    report.last_collect_at = latest.last_collect_at;
-    report.targets_total = latest.targets_total;
-    report.checks_ok = latest.checks_ok;
-    report.checks_warning = latest.checks_warning;
-    report.checks_critical = latest.checks_critical;
-    report.services_total = latest.services_total;
-    report.services_running = latest.services_running;
-    report.recovery_running = latest.recovery_running;
-    report.recovery_suspect = latest.recovery_suspect;
-    report.recovery_recovering = latest.recovery_recovering;
-    report.recovery_force_kill = latest.recovery_force_kill;
-    report.recovery_restarting = latest.recovery_restarting;
-    report.recovery_starting = latest.recovery_starting;
-    report.recovery_crashloop = latest.recovery_crashloop;
-    report.recovery_fatal = latest.recovery_fatal;
-    // P2(第九轮验证):eval 侧的单调 uptime 必须在此拷入 —— 此前 copy 块漏了
-    // 本字段，alert 计数器起底值恒 0，导致永远走下方墙钟回退，第八轮"单调
-    // 优先"修复实际未生效。
-    report.uptime_secs = latest.uptime_secs;
-    // F18:环形缓冲句柄随 eval 侧报告透传 (serde skip，不进 /metrics JSON)。
-    report.history = latest.history.clone();
+    let mut report = (*shared.metrics_rx.borrow().clone()).clone();
+    let alerts = shared.alert_counters.to_metrics();
+    report.alerts_sent = alerts.alerts_sent;
+    report.alert_delivery_failures = alerts.alert_delivery_failures;
+    report.alerts_dropped = alerts.alerts_dropped;
     // uptime: prefer the eval-side monotonic source (guards against wall-clock
     // jumps); fall back to the wall clock only while eval has not published
     // yet (startup instant). P3 (round 8): the old max() let the inflated
@@ -622,142 +587,127 @@ fn prom_line(out: &mut String, name: &str, help: &str, kind: &str, val: u64) {
 fn render_prometheus(m: &MetricsReport) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(2048);
-    prom_line(
-        &mut out,
-        "alerts_sent",
-        "Alert events dispatched successfully.",
-        "counter",
-        m.alerts_sent,
-    );
-    prom_line(
-        &mut out,
-        "alert_delivery_failures",
-        "Alert deliveries that exhausted retries.",
-        "counter",
-        m.alert_delivery_failures,
-    );
-    prom_line(
-        &mut out,
-        "alerts_dropped",
-        "Alert events dropped (queue full / shutdown drain).",
-        "counter",
-        m.alerts_dropped,
-    );
-    for (name, help, value) in [
+    // Single ordered table drives the exposition output (order + HELP text
+    // stay byte-stable; recovery_* keeps its historical no-HELP form below).
+    for (name, help, kind, val) in [
+        (
+            "alerts_sent",
+            "Alert events dispatched successfully.",
+            "counter",
+            m.alerts_sent,
+        ),
+        (
+            "alert_delivery_failures",
+            "Alert deliveries that exhausted retries.",
+            "counter",
+            m.alert_delivery_failures,
+        ),
+        (
+            "alerts_dropped",
+            "Alert events dropped (queue full / shutdown drain).",
+            "counter",
+            m.alerts_dropped,
+        ),
         (
             "journal_dropped",
             "Journal records rejected by the bounded writer queue.",
+            "counter",
             m.journal_dropped,
         ),
         (
             "journal_write_failures",
             "Journal write or flush failures.",
+            "counter",
             m.journal_write_failures,
         ),
         (
             "journal_write_successes",
             "Journal records successfully written.",
+            "counter",
             m.journal_write_successes,
         ),
         (
             "journal_critical_failures",
             "Critical recovery records that failed persistence.",
+            "counter",
             m.journal_critical_failures,
         ),
+        (
+            "probe_executed",
+            "Probes executed.",
+            "counter",
+            m.probe_executed,
+        ),
+        (
+            "probe_skipped",
+            "Probes skipped (previous still in flight).",
+            "counter",
+            m.probe_skipped,
+        ),
+        (
+            "restarts_total",
+            "Supervised process spawn attempts.",
+            "counter",
+            m.restarts_total,
+        ),
+        (
+            "state_transitions_total",
+            "Recovery state machine transitions.",
+            "counter",
+            m.state_transitions_total,
+        ),
+        (
+            "fatal_targets",
+            "Targets currently latched Fatal.",
+            "gauge",
+            m.fatal_targets,
+        ),
+        (
+            "degradations_current",
+            "Degradation entries in latest snapshot.",
+            "gauge",
+            m.degradations_current,
+        ),
+        (
+            "degradations_events",
+            "Degradation episodes (absent->present transitions).",
+            "counter",
+            m.degradations_events,
+        ),
+        (
+            "targets_total",
+            "Configured targets.",
+            "gauge",
+            m.targets_total,
+        ),
+        ("checks_ok", "Checks currently Ok.", "gauge", m.checks_ok),
+        (
+            "checks_warning",
+            "Checks currently Warning.",
+            "gauge",
+            m.checks_warning,
+        ),
+        (
+            "checks_critical",
+            "Checks currently Critical.",
+            "gauge",
+            m.checks_critical,
+        ),
+        (
+            "services_total",
+            "Supervised services.",
+            "gauge",
+            m.services_total,
+        ),
+        (
+            "services_running",
+            "Supervised services with a live child.",
+            "gauge",
+            m.services_running,
+        ),
     ] {
-        prom_line(&mut out, name, help, "counter", value);
+        prom_line(&mut out, name, help, kind, val);
     }
-    prom_line(
-        &mut out,
-        "probe_executed",
-        "Probes executed.",
-        "counter",
-        m.probe_executed,
-    );
-    prom_line(
-        &mut out,
-        "probe_skipped",
-        "Probes skipped (previous still in flight).",
-        "counter",
-        m.probe_skipped,
-    );
-    prom_line(
-        &mut out,
-        "restarts_total",
-        "Supervised process spawn attempts.",
-        "counter",
-        m.restarts_total,
-    );
-    prom_line(
-        &mut out,
-        "state_transitions_total",
-        "Recovery state machine transitions.",
-        "counter",
-        m.state_transitions_total,
-    );
-    prom_line(
-        &mut out,
-        "fatal_targets",
-        "Targets currently latched Fatal.",
-        "gauge",
-        m.fatal_targets,
-    );
-    prom_line(
-        &mut out,
-        "degradations_current",
-        "Degradation entries in latest snapshot.",
-        "gauge",
-        m.degradations_current,
-    );
-    prom_line(
-        &mut out,
-        "degradations_events",
-        "Degradation episodes (absent->present transitions).",
-        "counter",
-        m.degradations_events,
-    );
-    prom_line(
-        &mut out,
-        "targets_total",
-        "Configured targets.",
-        "gauge",
-        m.targets_total,
-    );
-    prom_line(
-        &mut out,
-        "checks_ok",
-        "Checks currently Ok.",
-        "gauge",
-        m.checks_ok,
-    );
-    prom_line(
-        &mut out,
-        "checks_warning",
-        "Checks currently Warning.",
-        "gauge",
-        m.checks_warning,
-    );
-    prom_line(
-        &mut out,
-        "checks_critical",
-        "Checks currently Critical.",
-        "gauge",
-        m.checks_critical,
-    );
-    prom_line(
-        &mut out,
-        "services_total",
-        "Supervised services.",
-        "gauge",
-        m.services_total,
-    );
-    prom_line(
-        &mut out,
-        "services_running",
-        "Supervised services with a live child.",
-        "gauge",
-        m.services_running,
-    );
     for (name, val) in [
         ("recovery_running", m.recovery_running),
         ("recovery_suspect", m.recovery_suspect),
@@ -1013,7 +963,7 @@ fn journal_tail_lines(
     since: Option<u64>,
 ) -> (Vec<serde_json::Value>, bool) {
     // 读入顺序 = 输出顺序：上一代在前、当前文件在后。
-    let gen1 = gen1_query_path(path);
+    let gen1 = crate::recover::journal::gen1_path(path);
     let mut contents: Vec<String> = Vec::new();
     let mut truncated_by_bytes = false;
     for file in [&gen1, path] {
@@ -1101,13 +1051,6 @@ fn journal_tail_read(path: &std::path::Path) -> (Option<String>, bool) {
         Some(String::from_utf8_lossy(&buf).into_owned()),
         truncated_by_bytes,
     )
-}
-
-/// F35:journal 查询侧的上一代路径推导 —— 委托 recover::journal::gen1_path
-/// (第十一轮验证 P3 去重：命名规则单一事实源，writer/查询两侧不会漂移)。
-#[cfg(feature = "control-http")]
-fn gen1_query_path(path: &std::path::Path) -> std::path::PathBuf {
-    crate::recover::journal::gen1_path(path)
 }
 
 /// `POST /v1/restart/{target}`:Fatal(经 status watch 判定)→ 409 + 提示
@@ -1307,25 +1250,6 @@ mod tests {
     }
 
     // ---- F35:journal 查询覆盖轮转上一代 ----
-
-    /// F35:查询侧上一代路径推导与 recover::journal 轮转命名规则一致
-    /// (`journal.jsonl` → 同目录 `journal.1.jsonl`;无扩展名/多级扩展名同规则)。
-    #[test]
-    fn gen1_query_path_matches_rotation_naming() {
-        let dir = std::env::temp_dir();
-        assert_eq!(
-            gen1_query_path(&dir.join("journal.jsonl")),
-            dir.join("journal.1.jsonl")
-        );
-        assert_eq!(
-            gen1_query_path(&dir.join("journal")),
-            dir.join("journal.1.jsonl")
-        );
-        assert_eq!(
-            gen1_query_path(&dir.join("a.b.jsonl")),
-            dir.join("a.b.1.jsonl")
-        );
-    }
 
     /// F35:gen1 + 当前文件合并 —— gen1 行在前、当前文件行在后 (时间顺序);
     /// 两文件坏行/空行各自隔离;过滤跨两代生效;tail 截断按合并后总命中数。

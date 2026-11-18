@@ -141,19 +141,15 @@ impl AlertQueue {
 
     /// 队列当前长度 (停机审计用)。
     pub fn len(&self) -> usize {
-        self.len_inner()
-    }
-
-    /// 队列是否为空。
-    pub fn is_empty(&self) -> bool {
-        self.len_inner() == 0
-    }
-
-    fn len_inner(&self) -> usize {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+    }
+
+    /// 队列是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// 阻塞取一个事件;shutdown 信号为 true 时返回 None。

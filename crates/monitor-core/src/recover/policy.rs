@@ -72,11 +72,6 @@ impl Backoff {
         self.initial.saturating_mul(mult).min(self.max)
     }
 
-    /// 仅读取当前尝试次数。
-    pub fn attempt(&self) -> u32 {
-        self.attempt
-    }
-
     pub fn reset(&mut self) {
         self.attempt = 0;
     }
@@ -164,18 +159,6 @@ impl BudgetWindow {
             }
         }
     }
-
-    /// 导出为墙钟时间戳 (持久化用)。
-    pub fn to_wall(&self, now_mono: Instant, now_wall: SystemTime) -> Vec<SystemTime> {
-        self.stamps
-            .iter()
-            .map(|&t| {
-                // Instant::duration_since 自 1.60 起饱和为零 (不 panic)
-                let ago = now_mono.duration_since(t);
-                now_wall.checked_sub(ago).unwrap_or(now_wall)
-            })
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -210,13 +193,13 @@ mod tests {
 
     #[test]
     fn budget_restore_roundtrip() {
-        let mut budget = BudgetWindow::new(5, Duration::from_secs(60));
+        // journal 持久化的是 Restart 事件 (墙钟时间戳);restore 直接消费墙钟窗口。
         let t0 = Instant::now();
         let w0 = SystemTime::now();
-        budget.record(t0 - Duration::from_secs(5));
-        budget.record(t0 - Duration::from_secs(2));
-        let wall = budget.to_wall(t0, w0);
-        assert_eq!(wall.len(), 2);
+        let wall = vec![
+            w0.checked_sub(Duration::from_secs(5)).unwrap(),
+            w0.checked_sub(Duration::from_secs(2)).unwrap(),
+        ];
         let mut restored = BudgetWindow::new(5, Duration::from_secs(60));
         restored.restore(&wall, w0, t0);
         assert_eq!(restored.count(t0), 2);

@@ -25,7 +25,7 @@
 //!
 //! ## 体积上限与单代轮转 (F24)
 //!
-//! 产品写入口 [`run_tracked_writer`] 接受 `max_size`(字节;来自
+//! 产品写入口 [`run_tracked_writer_with_limit`] 接受 `max_size`(字节;来自
 //! `agent.journal_max_size`,0 = 完全禁用轮转)。写事件后实测当前文件尺寸，
 //! 超限即轮转：当前 `journal.jsonl` 整体改名 `journal.1.jsonl` (覆盖上一代，
 //! **只保留一代**),立即重建当前文件并写入一条轮转 Audit。改名失败降级为
@@ -111,38 +111,22 @@ impl JournalCounters {
 /// 带失败计数及关键写入确认的 journal 出口。
 #[derive(Clone, Debug)]
 pub struct JournalSender {
-    tx: JournalChannel,
+    tx: mpsc::Sender<JournalRequest>,
     counters: Arc<JournalCounters>,
-}
-
-#[derive(Clone, Debug)]
-enum JournalChannel {
-    Tracked(mpsc::Sender<JournalRequest>),
-    /// 兼容已有嵌入调用者自行消费 JournalEvent 的接口。
-    Untracked(mpsc::Sender<JournalEvent>),
 }
 
 #[derive(Debug)]
 pub struct JournalRequest {
-    pub(crate) event: JournalEvent,
+    pub event: JournalEvent,
     pub(crate) ack: Option<oneshot::Sender<std::result::Result<(), String>>>,
 }
 
-impl From<mpsc::Sender<JournalEvent>> for JournalSender {
-    fn from(tx: mpsc::Sender<JournalEvent>) -> Self {
-        Self {
-            tx: JournalChannel::Untracked(tx),
-            counters: Arc::new(JournalCounters::default()),
-        }
-    }
-}
-
-/// 创建产品运行时使用的有界持久化通道。
+/// 创建运行时使用的有界持久化通道。
 pub fn channel(capacity: usize) -> (JournalSender, mpsc::Receiver<JournalRequest>) {
     let (tx, rx) = mpsc::channel(capacity);
     (
         JournalSender {
-            tx: JournalChannel::Tracked(tx),
+            tx,
             counters: Arc::new(JournalCounters::default()),
         },
         rx,
@@ -160,19 +144,15 @@ impl JournalSender {
         event: JournalEvent,
     ) -> std::result::Result<(), mpsc::error::TrySendError<JournalEvent>> {
         let critical = event.is_critical();
-        let result = match &self.tx {
-            JournalChannel::Untracked(tx) => tx.try_send(event),
-            JournalChannel::Tracked(tx) => tx
-                .try_send(JournalRequest { event, ack: None })
-                .map_err(|err| match err {
-                    mpsc::error::TrySendError::Full(req) => {
-                        mpsc::error::TrySendError::Full(req.event)
-                    }
-                    mpsc::error::TrySendError::Closed(req) => {
-                        mpsc::error::TrySendError::Closed(req.event)
-                    }
-                }),
-        };
+        let result = self
+            .tx
+            .try_send(JournalRequest { event, ack: None })
+            .map_err(|err| match err {
+                mpsc::error::TrySendError::Full(req) => mpsc::error::TrySendError::Full(req.event),
+                mpsc::error::TrySendError::Closed(req) => {
+                    mpsc::error::TrySendError::Closed(req.event)
+                }
+            });
         if result.is_err() {
             self.counters.dropped();
             if critical {
@@ -187,28 +167,19 @@ impl JournalSender {
 
     /// 关键状态等待 writer 的 sync_data 确认。2s 总预算覆盖队列背压与写入。
     /// 失败触发故障停机，避免当前 agent 继续在不可持久化的预算上自动恢复。
-    /// 从裸 mpsc sender 转换的兼容出口只确认入队，持久化由嵌入调用者负责。
     pub async fn send(&self, event: JournalEvent) -> std::result::Result<(), String> {
         let mut queued = false;
         let attempt = async {
-            match &self.tx {
-                JournalChannel::Untracked(tx) => {
-                    tx.send(event).await.map_err(|e| e.to_string())?;
-                    queued = true;
-                    Ok(())
-                }
-                JournalChannel::Tracked(tx) => {
-                    let (ack, received) = oneshot::channel();
-                    tx.send(JournalRequest {
-                        event,
-                        ack: Some(ack),
-                    })
-                    .await
-                    .map_err(|e| e.to_string())?;
-                    queued = true;
-                    received.await.map_err(|e| e.to_string())?
-                }
-            }
+            let (ack, received) = oneshot::channel();
+            self.tx
+                .send(JournalRequest {
+                    event,
+                    ack: Some(ack),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            queued = true;
+            received.await.map_err(|e| e.to_string())?
         };
         let result = tokio::time::timeout(CRITICAL_WRITE_TIMEOUT, attempt)
             .await
@@ -369,9 +340,7 @@ pub fn config_digest(cfg: &ServiceCfg) -> String {
     // —— 与 reload::service_hot_changed 对齐)+ FNV-1a-64(跨工具链稳定，
     // DefaultHasher 不保证跨 rustc 版本;升级 agent 二进制恰是崩溃后重启高发
     // 场景，软字段变更 (restart/activate) 不得改变意图归属 → 防 fail-open 双实例)。
-    use std::collections::hash_map::DefaultHasher as _UnusedStd;
     use std::hash::Hasher;
-    let _ = std::any::type_name::<_UnusedStd>();
     let mut h = Fnv64::default();
     for piece in [
         cfg.name.as_str(),
@@ -443,23 +412,6 @@ pub fn open_writer(path: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
-/// 兼容裸事件通道的写入口。所有文件 I/O 在阻塞任务中执行。
-/// 兼容入口固定不轮转 (max_size = 0):嵌入者自持通道与文件生命周期，保持
-/// 既有行为不变;产品路径经 [`run_tracked_writer`] 由 runtime 传入
-/// `cfg.agent.journal_max_size` (F24)。
-pub async fn run_writer(path: PathBuf, mut rx: mpsc::Receiver<JournalEvent>) -> Result<()> {
-    let counters = Arc::new(JournalCounters::default());
-    tokio::task::spawn_blocking(move || {
-        let file = open_writer(&path)?;
-        write_events(file, path, counters, 0, || {
-            rx.blocking_recv()
-                .map(|event| JournalRequest { event, ack: None })
-        })
-    })
-    .await
-    .map_err(|e| crate::error::CoreError::Recover(format!("journal 写任务异常退出：{e}")))?
-}
-
 /// 产品写入口。文件已由 runtime 在任务启动前打开并确认可写。
 /// `max_size`:journal 轮转阈值 (字节;0 = 完全禁用轮转，F24)。阈值从
 /// `agent.journal_max_size` 经 runtime 启动处传入;确认式持久化语义不变。
@@ -483,17 +435,6 @@ pub async fn run_tracked_writer_with_limit(
         failures.fail();
     }
     result
-}
-
-/// 4 参兼容入口 (固定 `max_size = 0`,无轮转):既有嵌入调用者 (eval 测试)
-/// 不经改动继续编译。产品运行时应使用 [`run_tracked_writer_with_limit`]。
-pub async fn run_tracked_writer(
-    file: std::fs::File,
-    path: PathBuf,
-    rx: mpsc::Receiver<JournalRequest>,
-    counters: Arc<JournalCounters>,
-) -> Result<()> {
-    run_tracked_writer_with_limit(file, path, rx, counters, 0).await
 }
 
 fn write_events(
@@ -632,17 +573,6 @@ fn rotate_file(
     Ok(new_file)
 }
 
-/// 同步重放 journal(启动路径调用一次)。
-pub fn replay(path: &Path) -> JournalState {
-    match replay_checked(path) {
-        Ok(state) => state,
-        Err(e) => {
-            tracing::error!(path = %path.display(), error = %e, "journal replay unavailable");
-            JournalState::default()
-        }
-    }
-}
-
 /// 运行时重放入口。无法读取既有日志时拒绝启动，避免空状态绕过 Fatal 闩锁。
 ///
 /// F24:`journal.1.jsonl` 存在时先重放上一代，再重放当前文件，顺序 apply 到
@@ -684,6 +614,26 @@ fn replay_file(path: &Path, state: &mut JournalState) -> Result<()> {
     Ok(())
 }
 
+/// Reset/ResetTargets 共用:解除 Fatal 闩锁 + 清空预算 + 清未决意图 + 关闭
+/// Fatal 合成 incident + 记录 reset 时点。Reset 语义 = 人工承认未知实例已
+/// 处置 (DESIGN §8.2 / FSM reset):重放时同样必须清掉该 target 的既有重启
+/// 素材，否则 monitorctl reset 后重启 agent,Reset 之前的旧重启记录会复活
+/// 并继续计入预算窗口 (第五轮评审:模块 doc 声称清除但 apply 未实现)。
+/// P2(第九轮验证):Fatal 的合成 incident (check = RECOVER_CHECK) 属恢复域
+/// —— reset 解除闩锁即同时闭门，否则此后每次重启都会对已 reset 的 target
+/// 重放虚假 "latched fatal" 重通知。(eval 侧 restore_incidents 另有 fatal
+/// 集合防御层。)
+fn reset_one(state: &mut JournalState, target: &str, at: SystemTime) {
+    state.fatal.remove(target);
+    state.restarts.remove(target);
+    state.pending_spawns.remove(target);
+    state.open_incidents.remove(&(
+        target.to_string(),
+        crate::model::alert::RECOVER_CHECK.to_string(),
+    ));
+    state.last_reset.insert(target.to_string(), at);
+}
+
 /// 按行顺序应用单条事件 (Reset 之后同 target 的新 Fatal 仍要置位)。
 fn apply(event: &JournalEvent, state: &mut JournalState) {
     match event {
@@ -694,35 +644,11 @@ fn apply(event: &JournalEvent, state: &mut JournalState) {
             state.fatal.insert(target.clone());
         }
         JournalEvent::Reset { at, target, .. } => {
-            state.fatal.remove(target);
-            // Reset 语义 = 解除闩锁 + 清空预算 (DESIGN §8.2 / FSM reset):重放时
-            // 同样必须清掉该 target 的既有重启素材，否则 monitorctl reset 后
-            // 重启 agent,Reset 之前的旧重启记录会复活并继续计入预算窗口
-            // (第五轮评审：模块 doc 声称清除但 apply 未实现)。
-            state.restarts.remove(target);
-            // 崩溃启动事务:reset = 人工承认未知实例已处置，清除未决意图，
-            // 重启后允许拉起 (对账不再跳过冷启动)。
-            state.pending_spawns.remove(target);
-            // P2(第九轮验证):Fatal 的合成 incident (check = RECOVER_CHECK) 属
-            // 恢复域 —— reset 解除闩锁即同时闭门，否则此后每次重启都会对已
-            // reset 的 target 重放虚假 "latched fatal" 重通知。(eval 侧
-            // restore_incidents 另有 fatal 集合防御层。)
-            state.open_incidents.remove(&(
-                target.clone(),
-                crate::model::alert::RECOVER_CHECK.to_string(),
-            ));
-            state.last_reset.insert(target.clone(), *at);
+            reset_one(state, target, *at);
         }
         JournalEvent::ResetTargets { at, targets, .. } => {
             for target in targets {
-                state.fatal.remove(target);
-                state.restarts.remove(target);
-                state.pending_spawns.remove(target);
-                state.open_incidents.remove(&(
-                    target.clone(),
-                    crate::model::alert::RECOVER_CHECK.to_string(),
-                ));
-                state.last_reset.insert(target.clone(), *at);
+                reset_one(state, target, *at);
             }
         }
         JournalEvent::ProcessIdentity {
@@ -854,7 +780,13 @@ mod tests {
         let file = open_writer(&path).unwrap();
         let (sender, rx) = channel(2);
         let counters = sender.counters().clone();
-        let writer = tokio::spawn(run_tracked_writer(file, path.clone(), rx, counters.clone()));
+        let writer = tokio::spawn(run_tracked_writer_with_limit(
+            file,
+            path.clone(),
+            rx,
+            counters.clone(),
+            0,
+        ));
         sender
             .send(JournalEvent::Fatal {
                 at: base(),
@@ -993,7 +925,7 @@ mod tests {
             }),
         );
         std::fs::write(&path, content).unwrap();
-        let state = replay(&path);
+        let state = replay_checked(&path).unwrap_or_default();
         assert_eq!(state.pending_spawns.len(), 1, "仅 app 留下未决意图");
         assert_eq!(state.pending_spawns["app"].config_digest, "digest-a");
         assert_eq!(state.pending_spawns["app"].at, t);
@@ -1137,11 +1069,12 @@ mod tests {
         std::fs::write(&path, r#"{"type":"audit""#).unwrap();
         let file = open_writer(&path).unwrap();
         let (sender, rx) = channel(1);
-        let writer = tokio::spawn(run_tracked_writer(
+        let writer = tokio::spawn(run_tracked_writer_with_limit(
             file,
             path.clone(),
             rx,
             sender.counters().clone(),
+            0,
         ));
         sender
             .send(JournalEvent::Fatal {
@@ -1192,6 +1125,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 单测助手:打开文件并启动产品 writer(禁轮转),事件经 JournalSender 投递。
+    fn spawn_test_writer(
+        path: &Path,
+        cap: usize,
+    ) -> (JournalSender, tokio::task::JoinHandle<Result<()>>) {
+        let (tx, rx) = channel(cap);
+        let file = open_writer(path).expect("open journal");
+        let writer = tokio::spawn(run_tracked_writer_with_limit(
+            file,
+            path.to_path_buf(),
+            rx,
+            tx.counters().clone(),
+            0,
+        ));
+        (tx, writer)
+    }
+
     fn base() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
     }
@@ -1202,8 +1152,7 @@ mod tests {
         cleanup(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("journal.jsonl");
-        let (tx, rx) = mpsc::channel(16);
-        let writer = tokio::spawn(run_writer(path.clone(), rx));
+        let (tx, writer) = spawn_test_writer(&path, 16);
         let t = base();
         tx.send(JournalEvent::Restart {
             at: t,
@@ -1256,7 +1205,7 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content.lines().count(), 6, "逐行 JSONL");
 
-        let state = replay(&path);
+        let state = replay_checked(&path).unwrap_or_default();
         assert_eq!(state.restarts["web-1"].len(), 2);
         assert_eq!(state.restarts["db-1"].len(), 1);
         assert!(state.fatal.contains("db-1"));
@@ -1282,8 +1231,7 @@ mod tests {
         cleanup(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("journal.jsonl");
-        let (tx, rx) = mpsc::channel(16);
-        let writer = tokio::spawn(run_writer(path.clone(), rx));
+        let (tx, writer) = spawn_test_writer(&path, 16);
         let t = base();
         let inc_event = |category: Category,
                          severity: Severity,
@@ -1353,7 +1301,7 @@ mod tests {
         drop(tx); // 关闭 → writer 返回 Ok
         writer.await.unwrap().unwrap();
 
-        let state = replay(&path);
+        let state = replay_checked(&path).unwrap_or_default();
         assert_eq!(
             state.open_incidents.len(),
             1,
@@ -1384,8 +1332,7 @@ mod tests {
         cleanup(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("journal.jsonl");
-        let (tx, rx) = mpsc::channel(16);
-        let writer = tokio::spawn(run_writer(path.clone(), rx));
+        let (tx, writer) = spawn_test_writer(&path, 16);
         let t = base();
         tx.try_send(JournalEvent::Fatal {
             at: t,
@@ -1412,7 +1359,7 @@ mod tests {
         drop(tx);
         writer.await.unwrap().unwrap();
 
-        let state = replay(&path);
+        let state = replay_checked(&path).unwrap_or_default();
         assert!(!state.fatal.contains("app"), "reset 解除 Fatal");
         assert!(
             state.open_incidents.is_empty(),
@@ -1426,8 +1373,7 @@ mod tests {
         let dir = tmp_dir("mkdir");
         cleanup(&dir);
         let path = dir.join("nested/deeper/journal.jsonl");
-        let (tx, rx) = mpsc::channel(4);
-        let writer = tokio::spawn(run_writer(path.clone(), rx));
+        let (tx, writer) = spawn_test_writer(&path, 4);
         tx.send(JournalEvent::Audit {
             at: base(),
             message: "first".into(),
@@ -1464,7 +1410,7 @@ mod tests {
             format!("{restart_line}\nnot-json-at-all\n\n{{\"type\":\"restart\"}}\n{fatal_line}\n"),
         )
         .unwrap();
-        let state = replay(&path);
+        let state = replay_checked(&path).unwrap_or_default();
         assert_eq!(
             state.restarts["a"].len(),
             1,
@@ -1477,7 +1423,7 @@ mod tests {
     #[test]
     fn replay_missing_file_yields_empty_state() {
         let dir = tmp_dir("missing");
-        let state = replay(&dir.join("nope.jsonl"));
+        let state = replay_checked(&dir.join("nope.jsonl")).unwrap_or_default();
         assert!(state.restarts.is_empty());
         assert!(state.fatal.is_empty());
     }
@@ -1516,7 +1462,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let state = replay(&path);
+        let state = replay_checked(&path).unwrap_or_default();
         assert_eq!(
             state.restarts["a"].len(),
             1,
@@ -1533,8 +1479,7 @@ mod tests {
         cleanup(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("journal.jsonl");
-        let (tx, rx) = mpsc::channel(8);
-        let writer = tokio::spawn(run_writer(path.clone(), rx));
+        let (tx, writer) = spawn_test_writer(&path, 8);
         let t = base();
         tx.send(JournalEvent::Fatal {
             at: t,
@@ -1567,7 +1512,7 @@ mod tests {
         drop(tx);
         writer.await.unwrap().unwrap();
 
-        let state = replay(&path);
+        let state = replay_checked(&path).unwrap_or_default();
         assert!(state.fatal.contains("app"), "Reset 后的新 Fatal 必须置位");
         assert!(!state.fatal.contains("other"));
         assert_eq!(state.last_reset["app"], t + Duration::from_secs(1));
@@ -1575,8 +1520,7 @@ mod tests {
 
         // 只有 Reset、无后续 Fatal:Fatal 被清除
         let path2 = dir.join("journal2.jsonl");
-        let (tx2, rx2) = mpsc::channel(8);
-        let writer2 = tokio::spawn(run_writer(path2.clone(), rx2));
+        let (tx2, writer2) = spawn_test_writer(&path2, 8);
         tx2.send(JournalEvent::Fatal {
             at: t,
             target: "app".into(),
@@ -1593,7 +1537,7 @@ mod tests {
         .unwrap();
         drop(tx2);
         writer2.await.unwrap().unwrap();
-        let state2 = replay(&path2);
+        let state2 = replay_checked(&path2).unwrap_or_default();
         assert!(!state2.fatal.contains("app"), "Reset 应清除 Fatal 闩锁");
         cleanup(&dir);
     }

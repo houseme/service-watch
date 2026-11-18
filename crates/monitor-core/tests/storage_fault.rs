@@ -50,11 +50,12 @@ async fn disk_full_open_fails_then_repair_and_restart() {
     let file = journal::open_writer(&journal_path).expect("修复后必须可打开");
     let (sender, rx) = journal::channel(8);
     let counters = std::sync::Arc::new(journal::JournalCounters::default());
-    let writer = tokio::spawn(journal::run_tracked_writer(
+    let writer = tokio::spawn(journal::run_tracked_writer_with_limit(
         file,
         journal_path.clone(),
         rx,
         counters.clone(),
+        0,
     ));
     sender
         .send(JournalEvent::Audit {
@@ -67,8 +68,6 @@ async fn disk_full_open_fails_then_repair_and_restart() {
     let writer_result = writer.await.expect("writer task joins");
     writer_result.expect("writer exits cleanly (persisted audit acknowledged)");
 
-    let state = journal::replay(&journal_path);
-    let _ = state;
     // 伴生文件不受影响
     assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "sibling data");
     // journal 重放含修复后事件 (经 replay_checked 无错)
@@ -116,7 +115,7 @@ fn power_loss_torn_line_isolated() {
     let torn = r#"{"type":"restart","at":{"secs_since_epoch":0,"nan"#; // 断电撕裂，无换行
     std::fs::write(&path, format!("{good1}\n{torn}")).unwrap();
 
-    let state: JournalState = journal::replay(&path);
+    let state: JournalState = journal::replay_checked(&path).unwrap_or_default();
     let _ = state; // 重放不 panic(撕裂行被跳过，good1 不受影响)
 
     // open_writer 半行定界 (追加 \n),修复后写入 → 重放可见
@@ -159,7 +158,7 @@ fn corrupt_json_line_skipped_on_replay() {
     let dir = tmpdir("corrupt");
     let path = dir.join("journal.jsonl");
     std::fs::write(&path, "{{{bad}}}\n").unwrap();
-    let state = journal::replay(&path);
+    let state = journal::replay_checked(&path).unwrap_or_default();
     let _ = state;
     // 追加合法事件后仍可重放 (不被坏行毒化)
     let file = journal::open_writer(&path).unwrap();

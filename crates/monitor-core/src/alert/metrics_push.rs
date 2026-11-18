@@ -233,8 +233,6 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let (metrics_tx, metrics_rx) = watch::channel(Arc::new(MetricsReport::default()));
-        let (jtx_raw, jrx) = tokio::sync::mpsc::channel::<crate::recover::journal::JournalEvent>(8);
-        let _jtx = crate::recover::journal::JournalSender::from(jtx_raw);
         let (shutdown_tx, shutdown) = watch::channel(false);
         let task = tokio::spawn(run_metrics_pusher(
             url::Url::parse(&format!("http://{addr}/metrics")).unwrap(),
@@ -259,7 +257,6 @@ mod tests {
         assert!(hits.load(Ordering::Relaxed) >= 2, "必须按周期重复投递");
         shutdown_tx.send(true).ok();
         let _ = task.await;
-        let _ = jrx; // 保持接收端存活
     }
 
     /// 失败路径：连接拒绝 → 连败不 panic、任务存活;恢复后审计边沿 (journal 收到)。
@@ -270,9 +267,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener); // 立即释放 → 连接拒绝
         let (metrics_tx, metrics_rx) = watch::channel(Arc::new(MetricsReport::default()));
-        let (jtx_raw, mut jrx) =
-            tokio::sync::mpsc::channel::<crate::recover::journal::JournalEvent>(16);
-        let jtx = crate::recover::journal::JournalSender::from(jtx_raw);
+        let (jtx, mut jrx) = crate::recover::journal::channel(16);
         let (shutdown_tx, shutdown) = watch::channel(false);
         let task = tokio::spawn(run_metrics_pusher(
             url::Url::parse(&format!("http://{addr}/m")).unwrap(),
@@ -288,8 +283,8 @@ mod tests {
         let mut got_streak_audit = false;
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            while let Ok(ev) = jrx.try_recv() {
-                if let crate::recover::journal::JournalEvent::Audit { message, .. } = ev
+            while let Ok(req) = jrx.try_recv() {
+                if let crate::recover::journal::JournalEvent::Audit { message, .. } = req.event
                     && message.contains("persistently")
                 {
                     got_streak_audit = true;

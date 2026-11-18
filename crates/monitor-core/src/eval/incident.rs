@@ -75,15 +75,6 @@ pub struct IncidentTracker {
     flap_suppressed: HashSet<u64>,
 }
 
-/// 健康级别排序 (Ok < Warning < Critical)。
-fn rank(level: HealthLevel) -> u8 {
-    match level {
-        HealthLevel::Ok => 0,
-        HealthLevel::Warning => 1,
-        HealthLevel::Critical => 2,
-    }
-}
-
 fn severity_of(level: HealthLevel) -> Severity {
     match level {
         HealthLevel::Critical => Severity::Critical,
@@ -268,10 +259,10 @@ impl IncidentTracker {
             trail.occurrences = trail.occurrences.saturating_add(1);
             trail.last_seen = now;
             let escalated = level == HealthLevel::Critical && trail.level == HealthLevel::Warning;
-            if rank(level) > rank(trail.level) {
+            if level.rank() > trail.level.rank() {
                 trail.level = level;
             }
-            if rank(level) > rank(trail.peak) {
+            if level.rank() > trail.peak.rank() {
                 trail.peak = level;
             }
 

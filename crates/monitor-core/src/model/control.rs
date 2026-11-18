@@ -115,6 +115,18 @@ pub enum HealthLevel {
     Critical,
 }
 
+impl HealthLevel {
+    /// Ordering key (Ok < Warning < Critical) — shared by eval status
+    /// aggregation and the incident tracker.
+    pub fn rank(self) -> u8 {
+        match self {
+            HealthLevel::Ok => 0,
+            HealthLevel::Warning => 1,
+            HealthLevel::Critical => 2,
+        }
+    }
+}
+
 /// 单个 target 的运行态摘要。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetStatus {

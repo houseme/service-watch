@@ -99,8 +99,8 @@ jobs:
             cp "${bin}/monitor-agent" "${bin}/monitorctl" "dist/${pkg}/"
             mkdir -p "dist/${pkg}/deploy"
             cp docs/deploy/systemd/service-watch.service "dist/${pkg}/deploy/"
-            # launchd plist 仅随 apple-darwin 产物分发 (当前矩阵无 darwin 格，
-            # macOS 恢复后自动带回)。
+            # launchd plist 仅随 apple-darwin 产物分发 (darwin 双目标矩阵已恢复,
+            # 见 e358a5c)。
             if [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
               cp docs/deploy/launchd/com.houseme.service-watch.plist "dist/${pkg}/deploy/"
             fi

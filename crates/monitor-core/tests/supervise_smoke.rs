@@ -94,11 +94,19 @@ async fn spawn_agent(services: Vec<ServiceCfg>) -> Harness {
             }
         });
     }
-    let (journal_tx, journal_rx) = mpsc::channel(64);
-    tokio::spawn(monitor_core::recover::journal::run_writer(
-        tmp.0.join("journal.jsonl"),
-        journal_rx,
-    ));
+    let (journal_tx, journal_rx) = monitor_core::recover::journal::channel(64);
+    let journal_path = tmp.0.join("journal.jsonl");
+    let journal_file =
+        monitor_core::recover::journal::open_writer(&journal_path).expect("open journal");
+    tokio::spawn(
+        monitor_core::recover::journal::run_tracked_writer_with_limit(
+            journal_file,
+            journal_path,
+            journal_rx,
+            journal_tx.counters().clone(),
+            0,
+        ),
+    );
     let (cmd_tx, cmd_rx) = mpsc::channel(4);
     let (metrics_tx, _metrics_rx) = watch::channel(Arc::new(
         monitor_core::model::control::MetricsReport::default(),
@@ -118,7 +126,7 @@ async fn spawn_agent(services: Vec<ServiceCfg>) -> Harness {
         snapshot_rx: snap_rx,
         alert: queue,
         watched,
-        journal_tx: journal_tx.into(),
+        journal_tx,
         control_rx: cmd_rx,
         status_tx: status_tx.clone(),
         metrics_tx: metrics_tx.clone(),

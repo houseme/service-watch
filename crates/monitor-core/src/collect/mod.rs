@@ -22,13 +22,6 @@ pub struct CollectOutput {
     pub processes: Vec<ProcessSnapshot>,
 }
 
-impl CollectOutput {
-    /// 以进程身份查找快照 (`(pid, start_time)` 匹配才返回，防 PID 复用)。
-    pub fn find(&self, identity: &crate::model::ids::ProcessIdentity) -> Option<&ProcessSnapshot> {
-        self.processes.iter().find(|p| &p.identity == identity)
-    }
-}
-
 /// 同步采集器。实现必须：
 /// 1. 独占 `sysinfo::System`,由单一线程驱动 (禁止多线程共享);
 /// 2. 每轮对 `watched` 全量传入部分刷新 (漏传者停留旧数据);

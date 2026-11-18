@@ -413,6 +413,16 @@ pub(crate) fn find_by_identity<'a>(
     })
 }
 
+/// 登记期望身份并采纳观测快照 (check.rs 身份比对按精确相等,观测身份优先;
+/// resolve_process_target 四处同构块提取)。
+fn adopt_observed(out: &mut ResolvedProbe, snap: &CollectOutput, ident: ProcessIdentity) {
+    out.expected = Some(ident);
+    if let Some(p) = find_by_identity(snap, &ident) {
+        out.expected = Some(p.identity);
+        out.snapshot = Some(p.clone());
+    }
+}
+
 /// 启动时读取 watch 目标身份:pid 配置优先，否则读一次 pidfile( trim + parse u32)。
 /// start_time 无法探明，以 0 占位 (v0.1 限制，见模块 doc)。
 fn resolve_watch_identity(w: &WatchCfg) -> Option<ProcessIdentity> {
@@ -1010,9 +1020,7 @@ impl Scheduler {
         for sidx in 0..self.svcs.len() {
             self.service_tick(sidx, &snap, now_mono, now_wall, h).await;
         }
-        if self.last_gone_eval_sample != Some(snap.collected_at) {
-            self.last_gone_eval_sample = Some(snap.collected_at);
-        }
+        self.last_gone_eval_sample = Some(snap.collected_at);
 
         // 3')F14:reload 移除服务的停止中 child 继续收割 (防僵尸)——调度侧已无
         //     该条目，退出事件 (无 FSM 可喂) 就地丢弃;收割完成即移除登记。
@@ -1097,16 +1105,17 @@ impl Scheduler {
         }
         self.degradations_prev_present = Some(now_degraded);
 
+        let js = h.journal_tx.counters().snapshot();
         let mut m = crate::model::control::MetricsReport {
             probe_executed: self.checks.iter().map(|c| c.executed).sum(),
             probe_skipped: self.checks.iter().map(|c| c.skipped).sum(),
             restarts_total: self.svcs.iter().map(|s| s.fsm.restarts_total()).sum(),
             state_transitions_total: self.svcs.iter().map(|s| s.fsm.transitions_total()).sum(),
             fatal_targets: self.svcs.iter().filter(|s| s.fsm.is_fatal()).count() as u64,
-            journal_dropped: h.journal_tx.counters().snapshot().dropped,
-            journal_write_failures: h.journal_tx.counters().snapshot().write_failures,
-            journal_write_successes: h.journal_tx.counters().snapshot().write_successes,
-            journal_critical_failures: h.journal_tx.counters().snapshot().critical_failures,
+            journal_dropped: js.dropped,
+            journal_write_failures: js.write_failures,
+            journal_write_successes: js.write_successes,
+            journal_critical_failures: js.critical_failures,
             degradations_current: snap.hardware.degradations.len() as u64,
             degradations_events: self.degradations_events,
             last_collect_at: Some(snap.hardware.timestamp),
@@ -1200,11 +1209,10 @@ impl Scheduler {
             }
         }
 
-        let transition = self.checks[idx].state.observe(ok);
-        let level = self.checks[idx].state.level();
-        if transition.is_some() {
+        if self.checks[idx].state.observe(ok).is_some() {
             self.checks[idx].last_transition_wall = Some(now_wall);
         }
+        let level = self.checks[idx].state.level();
 
         // incident 去噪 (§7.2):每轮都喂当前级别;renotify 由 tracker 按间隔判定。
         let (target, check_label) = self.labels(idx);
@@ -1263,7 +1271,6 @@ impl Scheduler {
                     .await;
             }
         }
-        let _ = transition; // 转移仅用于 last_transition_wall(上方已处理)
     }
 
     /// supervise 服务的每轮处理:liveness、亲生退出、fsm 周期驱动、spawn 到点、
@@ -3025,12 +3032,6 @@ impl Scheduler {
         })
     }
 
-    /// 纯判定 (测试注入点):FSM Running + 有存活证据 = 满足。
-    #[cfg(test)]
-    fn dep_is_ready(fsm_state: RecoveryState, has_live_child: bool) -> bool {
-        fsm_state == RecoveryState::Running && has_live_child
-    }
-
     /// 距下一次唤醒的时长：最近到期事件，上限 MAX_TICK(fsm 内部截止兜底)。
     fn next_wake_delay(&self, now: Instant) -> Duration {
         let mut earliest = now + MAX_TICK;
@@ -3086,12 +3087,7 @@ impl Scheduler {
                                 .or_else(|| s.orphan.as_ref().map(OrphanTracker::identity))
                             && ident.pid.0 == pid
                         {
-                            out.expected = Some(ident);
-                            if let Some(p) = find_by_identity(snap, &ident) {
-                                // 采纳观测身份:check.rs 的身份比对按精确相等
-                                out.expected = Some(p.identity);
-                                out.snapshot = Some(p.clone());
-                            }
+                            adopt_observed(&mut out, snap, ident);
                             return out;
                         }
                     }
@@ -3099,11 +3095,7 @@ impl Scheduler {
                         if let Some(ident) = w.identity
                             && ident.pid.0 == pid
                         {
-                            out.expected = Some(ident);
-                            if let Some(p) = find_by_identity(snap, &ident) {
-                                out.expected = Some(p.identity);
-                                out.snapshot = Some(p.clone());
-                            }
+                            adopt_observed(&mut out, snap, ident);
                             return out;
                         }
                     }
@@ -3129,11 +3121,7 @@ impl Scheduler {
                 h.pm.identity(&s.cfg.name)
                     .or_else(|| s.orphan.as_ref().map(OrphanTracker::identity))
             {
-                out.expected = Some(ident);
-                if let Some(p) = find_by_identity(snap, &ident) {
-                    out.expected = Some(p.identity);
-                    out.snapshot = Some(p.clone());
-                }
+                adopt_observed(&mut out, snap, ident);
             }
             return out;
         }
@@ -3143,11 +3131,7 @@ impl Scheduler {
             .find(|w| target_name_matches(&w.name, process))
             && let Some(ident) = w.identity
         {
-            out.expected = Some(ident);
-            if let Some(p) = find_by_identity(snap, &ident) {
-                out.expected = Some(p.identity);
-                out.snapshot = Some(p.clone());
-            }
+            adopt_observed(&mut out, snap, ident);
         }
         out
     }
@@ -3237,6 +3221,43 @@ impl Scheduler {
         h.alert.push(ev.clone());
     }
 
+    /// 聚合一组绑定检查:max-rank health(带初值)/max-rank incident/最新
+    /// last_transition/check 名列表 —— 服务段(orphan 初值 Warning)与 watch 段
+    /// 同构,提取单一实现。
+    fn aggregate_checks(
+        &self,
+        idxs: &[usize],
+        mut health: HealthLevel,
+    ) -> (
+        HealthLevel,
+        Option<HealthLevel>,
+        Option<SystemTime>,
+        Vec<String>,
+    ) {
+        let mut incident: Option<HealthLevel> = None;
+        let mut last_transition: Option<SystemTime> = None;
+        let mut check_names = Vec::with_capacity(idxs.len());
+        for &i in idxs {
+            let lvl = self.checks[i].state.level();
+            if lvl.rank() > health.rank() {
+                health = lvl;
+            }
+            let (t, c) = self.labels(i);
+            if let Some(l) = self.tracker.incident_level(&t, &c)
+                && incident.is_none_or(|cur| l.rank() > cur.rank())
+            {
+                incident = Some(l);
+            }
+            if let Some(t) = self.checks[i].last_transition_wall
+                && last_transition.is_none_or(|cur| t > cur)
+            {
+                last_transition = Some(t);
+            }
+            check_names.push(self.checks[i].cfg.name.clone());
+        }
+        (health, incident, last_transition, check_names)
+    }
+
     /// 重建 `/status` 汇报 (targets = 独立检查 + supervise 服务 + watch 目标)。
     fn build_status(&self, h: &SchedulerHandles, now_mono: Instant) -> StatusReport {
         let mut targets =
@@ -3261,7 +3282,7 @@ impl Scheduler {
         }
 
         for s in &self.svcs {
-            let mut health = if s
+            let initial = if s
                 .orphan
                 .as_ref()
                 .is_some_and(|tracker| !tracker.is_attached())
@@ -3270,27 +3291,8 @@ impl Scheduler {
             } else {
                 HealthLevel::Ok
             };
-            let mut incident: Option<HealthLevel> = None;
-            let mut last_transition: Option<SystemTime> = None;
-            let mut check_names = Vec::with_capacity(s.checks.len());
-            for &i in &s.checks {
-                let lvl = self.checks[i].state.level();
-                if rank(lvl) > rank(health) {
-                    health = lvl;
-                }
-                let (t, c) = self.labels(i);
-                if let Some(l) = self.tracker.incident_level(&t, &c)
-                    && incident.is_none_or(|cur| rank(l) > rank(cur))
-                {
-                    incident = Some(l);
-                }
-                if let Some(t) = self.checks[i].last_transition_wall
-                    && last_transition.is_none_or(|cur| t > cur)
-                {
-                    last_transition = Some(t);
-                }
-                check_names.push(self.checks[i].cfg.name.clone());
-            }
+            let (mut health, incident, last_transition, check_names) =
+                self.aggregate_checks(&s.checks, initial);
             if s.fsm.is_fatal() {
                 health = HealthLevel::Critical;
             }
@@ -3327,28 +3329,8 @@ impl Scheduler {
         for w in &self.watches {
             // 绑定检查聚合到 watch 条目 (评审 P2:否则 watch 恒 Ok 而同名 check
             // 独立报 Critical，运维视角自相矛盾)。
-            let mut health = HealthLevel::Ok;
-            let mut incident: Option<HealthLevel> = None;
-            let mut last_transition: Option<SystemTime> = None;
-            let mut check_names = Vec::with_capacity(w.checks.len());
-            for &i in &w.checks {
-                let lvl = self.checks[i].state.level();
-                if rank(lvl) > rank(health) {
-                    health = lvl;
-                }
-                let (t, c) = self.labels(i);
-                if let Some(l) = self.tracker.incident_level(&t, &c)
-                    && incident.is_none_or(|cur| rank(l) > rank(cur))
-                {
-                    incident = Some(l);
-                }
-                if let Some(t) = self.checks[i].last_transition_wall
-                    && last_transition.is_none_or(|cur| t > cur)
-                {
-                    last_transition = Some(t);
-                }
-                check_names.push(self.checks[i].cfg.name.clone());
-            }
+            let (health, incident, last_transition, check_names) =
+                self.aggregate_checks(&w.checks, HealthLevel::Ok);
             targets.push(TargetStatus {
                 name: w.name.clone(),
                 mode: TargetMode::Attach,
@@ -3367,15 +3349,6 @@ impl Scheduler {
             ready: true,
             targets,
         }
-    }
-}
-
-/// 健康级别排序 (Ok < Warning < Critical)。
-fn rank(level: HealthLevel) -> u8 {
-    match level {
-        HealthLevel::Ok => 0,
-        HealthLevel::Warning => 1,
-        HealthLevel::Critical => 2,
     }
 }
 
@@ -3564,10 +3537,11 @@ mod tests {
             .fsm
             .restore(true, &[], SystemTime::UNIX_EPOCH, Instant::now());
         assert!(sched.svcs[db].fsm.is_fatal());
-        // Fatal 依赖:Fsm≠Running → 纯判定即不满足 (即便有存活证据)
-        assert!(
-            !Scheduler::dep_is_ready(sched.svcs[db].fsm.state(), true),
-            "依赖 Fatal 不得满足"
+        // Fatal 依赖:Fsm≠Running → 门控即不满足 (即便有存活证据)
+        assert_ne!(
+            sched.svcs[db].fsm.state(),
+            RecoveryState::Running,
+            "依赖 Fatal 不得满足门控"
         );
     }
 
@@ -3681,7 +3655,7 @@ mod tests {
         assert_eq!(legacy_ev.reason, "restored from journal: old trail");
 
         // journal:每起重通知都有 Incident 事件 (写路径一致性)。
-        let events = drain_journal(&mut journal_rx);
+        let events = drain_journal(&mut journal_rx).await;
         let incs: Vec<&JournalEvent> = events
             .iter()
             .filter(|e| matches!(e, JournalEvent::Incident { .. }))
@@ -3763,7 +3737,7 @@ mod tests {
         );
         // 恢复重通知之外，窗口内的抑制不产生额外 journal Incident 事件;
         // Resolve 事件由 observe 返回，此处只校验启动期已写一条。
-        let events = drain_journal(&mut journal_rx);
+        let events = drain_journal(&mut journal_rx).await;
         assert_eq!(
             events
                 .iter()
@@ -3845,7 +3819,10 @@ mod tests {
         let popped =
             tokio::time::timeout(Duration::from_millis(150), h.alert.clone().pop(rx)).await;
         assert!(popped.is_err(), "空表不得产出任何通知");
-        assert!(drain_journal(&mut journal_rx).is_empty(), "无 journal 写");
+        assert!(
+            drain_journal(&mut journal_rx).await.is_empty(),
+            "无 journal 写"
+        );
     }
 
     /// H-P1 回归:journal 同时含旧 ProcessIdentity 与未决 SpawnIntent(真实崩溃
@@ -4018,8 +3995,11 @@ mod tests {
         assert_eq!(running, RecoveryState::Running);
         assert!(api_scheduled, "级联拉回必须为 api 排程冷启动");
         let mut audits = Vec::new();
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
         while let Ok(ev) = journal_rx.try_recv() {
-            if let JournalEvent::Audit { message, .. } = ev {
+            if let JournalEvent::Audit { message, .. } = ev.event {
                 audits.push(message);
             }
         }
@@ -4137,8 +4117,11 @@ mod tests {
 
         // 关键断言:api 的 journal 中不得出现 JournalRestart(计划内停止零预算)
         let mut api_restarts = 0;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
         while let Ok(ev) = journal_rx.try_recv() {
-            if let JournalEvent::Restart { target, .. } = ev
+            if let JournalEvent::Restart { target, .. } = ev.event
                 && target == "api"
             {
                 api_restarts += 1;
@@ -4274,19 +4257,37 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn reload_handles() -> (
         SchedulerHandles,
-        mpsc::Receiver<JournalEvent>,
+        mpsc::UnboundedReceiver<journal::JournalRequest>,
         watch::Receiver<Arc<StatusReport>>,
         watch::Receiver<Arc<crate::model::control::MetricsReport>>,
     ) {
-        let (journal_tx, journal_rx) = mpsc::channel(64);
-        let (h, status_rx, metrics_rx) = handles_with_journal(journal_tx.into());
-        (h, journal_rx, status_rx, metrics_rx)
+        let (journal_tx, mut journal_rx) = journal::channel(64);
+        // writer 替身:排空请求、立即 ack (send 的确认语义需要有应答方)、
+        // 原样转发给观察通道 —— eval 测试只断言事件内容,不落盘。
+        let (obs_tx, obs_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(mut req) = journal_rx.recv().await {
+                if let Some(ack) = req.ack.take() {
+                    let _ = ack.send(Ok(()));
+                }
+                let _ = obs_tx.send(req);
+            }
+        });
+        let (h, status_rx, metrics_rx) = handles_with_journal(journal_tx);
+        (h, obs_rx, status_rx, metrics_rx)
     }
 
-    fn drain_journal(rx: &mut mpsc::Receiver<JournalEvent>) -> Vec<JournalEvent> {
+    async fn drain_journal(
+        rx: &mut mpsc::UnboundedReceiver<journal::JournalRequest>,
+    ) -> Vec<JournalEvent> {
+        // 替身转发是异步一跳:先让出几拍调度,让 stub 排空当前积压再观察
+        // (current-thread 测试运行时下,yield 后 stub 已消费全部待处理请求)。
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
         let mut evs = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            evs.push(ev);
+        while let Ok(req) = rx.try_recv() {
+            evs.push(req.event);
         }
         evs
     }
@@ -4417,7 +4418,7 @@ mod tests {
             .await;
         assert!(sched.silences.is_empty());
 
-        let evs = drain_journal(&mut journal_rx);
+        let evs = drain_journal(&mut journal_rx).await;
         let msgs = audit_messages(&evs);
         assert!(
             msgs.iter()
@@ -4488,7 +4489,7 @@ mod tests {
             .await;
         assert!(sched.silences.is_empty(), "全部拒绝：不得入表");
 
-        let evs = drain_journal(&mut journal_rx);
+        let evs = drain_journal(&mut journal_rx).await;
         let msgs = audit_messages(&evs);
         assert!(
             msgs.iter().any(|m| m.contains("duration 0s out of range")),
@@ -4529,7 +4530,7 @@ mod tests {
                 &mut h,
             )
             .await;
-        let _ = drain_journal(&mut journal_rx); // 清掉建立审计，隔离抑制可见性断言
+        let _ = drain_journal(&mut journal_rx).await; // 清掉建立审计，隔离抑制可见性断言
 
         // Alert 被抑制：不入队
         let ev = silence_alert_event("c1", Category::Alert);
@@ -4549,7 +4550,7 @@ mod tests {
         // 抑制可见性：期内恰好一条 (第二次抑制不重复)
         sched.emit_alert(&silence_alert_event("c1", Category::Escalate), t0, wall, &h);
         assert!(h.alert.is_empty(), "Escalate 同样被抑制");
-        let evs = drain_journal(&mut journal_rx);
+        let evs = drain_journal(&mut journal_rx).await;
         let msgs = audit_messages(&evs);
         let silenced: Vec<&&str> = msgs
             .iter()
@@ -4643,7 +4644,7 @@ mod tests {
         sched.expire_silences(t0 + Duration::from_secs(59), wall, &h);
         assert!(sched.silences.contains_key("c1"), "未到期不得清理");
         assert!(
-            audit_messages(&drain_journal(&mut journal_rx))
+            audit_messages(&drain_journal(&mut journal_rx).await)
                 .iter()
                 .all(|m| !m.starts_with("silence expired for target c1")),
             "未到期不写到期审计"
@@ -4652,7 +4653,7 @@ mod tests {
         // 到期 (until <= now):移除 + 恰好一条到期审计
         sched.expire_silences(t0 + Duration::from_secs(60), wall, &h);
         assert!(sched.silences.is_empty(), "过期条目不得残留");
-        let evs = drain_journal(&mut journal_rx);
+        let evs = drain_journal(&mut journal_rx).await;
         let msgs = audit_messages(&evs);
         assert_eq!(
             msgs.iter()
@@ -4665,7 +4666,7 @@ mod tests {
         // 重复调用：条目已移除，无副作用
         sched.expire_silences(t0 + Duration::from_secs(120), wall, &h);
         assert!(
-            audit_messages(&drain_journal(&mut journal_rx))
+            audit_messages(&drain_journal(&mut journal_rx).await)
                 .iter()
                 .all(|m| !m.starts_with("silence expired for target c1")),
             "过期审计是边沿，不重复"
@@ -4719,7 +4720,7 @@ mod tests {
         }
         // 抑制命中不写 journal (防刷屏：窗口开启 Audit 才是边沿)
         assert!(
-            drain_journal(&mut journal_rx).is_empty(),
+            drain_journal(&mut journal_rx).await.is_empty(),
             "抑制命中不逐条写审计"
         );
 
@@ -4791,7 +4792,7 @@ mod tests {
 
         // 进入窗口 → 恰好一条 opened (有 name 报 name)
         sched.update_maintenance_edges(wall_in, &h);
-        let open_evs = drain_journal(&mut journal_rx);
+        let open_evs = drain_journal(&mut journal_rx).await;
         let msgs = audit_messages(&open_evs);
         assert_eq!(
             msgs.iter()
@@ -4809,13 +4810,13 @@ mod tests {
         // 同一窗口内重复检查：无新边沿
         sched.update_maintenance_edges(wall_in, &h);
         assert!(
-            drain_journal(&mut journal_rx).is_empty(),
+            drain_journal(&mut journal_rx).await.is_empty(),
             "窗口内重复检查无审计"
         );
 
         // 离开窗口 (60s 后) → 恰好一条 closed
         sched.update_maintenance_edges(wall_out, &h);
-        let closed_evs = drain_journal(&mut journal_rx);
+        let closed_evs = drain_journal(&mut journal_rx).await;
         let msgs = audit_messages(&closed_evs);
         assert_eq!(
             msgs.iter()
@@ -4833,7 +4834,7 @@ mod tests {
         // 窗口外重复检查：无新边沿
         sched.update_maintenance_edges(wall_out, &h);
         assert!(
-            drain_journal(&mut journal_rx).is_empty(),
+            drain_journal(&mut journal_rx).await.is_empty(),
             "窗口外重复检查无审计"
         );
     }
@@ -4986,7 +4987,7 @@ mod tests {
             ["w2"]
         );
 
-        let evs = drain_journal(&mut journal_rx);
+        let evs = drain_journal(&mut journal_rx).await;
         let texts: Vec<String> = evs
             .iter()
             .filter_map(|e| match e {
@@ -5051,7 +5052,7 @@ mod tests {
         assert!(sched.svcs.is_empty());
         assert!(sched.pending_reap.is_empty(), "未运行的服务无需收割登记");
 
-        let evs = drain_journal(&mut journal_rx);
+        let evs = drain_journal(&mut journal_rx).await;
         assert!(
             evs.iter().any(|e| matches!(
                 e,
@@ -5091,7 +5092,7 @@ mod tests {
         assert_eq!(rt.spawn_due, Some(now));
         assert!(rt.reload_stop_deadline.is_none());
 
-        let evs = drain_journal(&mut journal_rx);
+        let evs = drain_journal(&mut journal_rx).await;
         assert!(
             evs.iter().any(|e| matches!(
                 e,
@@ -5135,7 +5136,7 @@ mod tests {
             sched.checks[0].state.level(),
             crate::model::control::HealthLevel::Ok
         );
-        let evs = drain_journal(&mut journal_rx);
+        let evs = drain_journal(&mut journal_rx).await;
         assert!(
             !evs.iter()
                 .any(|e| matches!(e, JournalEvent::Incident { .. })),
@@ -5481,8 +5482,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn service_binding_precedes_same_named_watch_during_resolution() {
+    #[tokio::test]
+    async fn service_binding_precedes_same_named_watch_during_resolution() {
         let cfg = Config::from_toml_str(
             r#"
             [[service]]
@@ -5610,7 +5611,7 @@ mod tests {
             RecoveryState::Suspect,
             "FSM 标记 Suspect(可观测)"
         );
-        let evs = drain_journal(&mut journal_rx);
+        let evs = drain_journal(&mut journal_rx).await;
         assert!(
             evs.iter().any(|e| matches!(
                 e,
@@ -5640,7 +5641,7 @@ mod tests {
         );
         assert!(!sched.svcs[0].orphan_suspected);
         assert_eq!(sched.svcs[0].fsm.state(), RecoveryState::Running);
-        let evs = drain_journal(&mut journal_rx);
+        let evs = drain_journal(&mut journal_rx).await;
         assert!(
             !evs.iter()
                 .any(|e| matches!(e, JournalEvent::Audit { message, .. }
@@ -5697,7 +5698,7 @@ mod tests {
             sched.svcs[0].spawn_due, None,
             "restart 不得绕过未知实例窗口"
         );
-        let evs = drain_journal(&mut journal_rx);
+        let evs = drain_journal(&mut journal_rx).await;
         assert!(
             evs.iter().any(|e| matches!(
                 e,
@@ -5727,6 +5728,7 @@ mod tests {
         assert_eq!(sched.svcs[0].spawn_due, Some(reset_at), "reset 后允许拉起");
         assert!(
             drain_journal(&mut journal_rx)
+                .await
                 .iter()
                 .any(|e| matches!(e, JournalEvent::Reset { target, .. } if target == "app")),
             "reset 写 journal(重放侧同步清除未决意图)"
@@ -5814,11 +5816,12 @@ mod tests {
         let file = journal::open_writer(&path).unwrap();
         let (journal_tx, rx) = journal::channel(16);
         let counters = journal_tx.counters().clone();
-        let writer = tokio::spawn(journal::run_tracked_writer(
+        let writer = tokio::spawn(journal::run_tracked_writer_with_limit(
             file,
             path.clone(),
             rx,
             counters,
+            0,
         ));
         let cfg = Config::from_toml_str(
             r#"
@@ -5848,7 +5851,7 @@ mod tests {
             "意图必须先于一切事件落盘，首行 = {first}"
         );
         assert!(content.contains("\"spawn_outcome\""), "结果必须落盘");
-        let state = journal::replay(&path);
+        let state = journal::replay_checked(&path).unwrap_or_default();
         assert!(
             state.pending_spawns.is_empty(),
             "成功 spawn 的 outcome 关闭未知实例窗口"
@@ -5872,11 +5875,12 @@ mod tests {
         let file = journal::open_writer(&path).unwrap();
         let (journal_tx, rx) = journal::channel(16);
         let counters = journal_tx.counters().clone();
-        let writer = tokio::spawn(journal::run_tracked_writer(
+        let writer = tokio::spawn(journal::run_tracked_writer_with_limit(
             file,
             path.clone(),
             rx,
             counters,
+            0,
         ));
         let cfg = spawn_tx_cfg("/nonexistent/service-watch-spawn-fail");
         let (mut h, _sr, _mr) = handles_with_journal(journal_tx);
@@ -5906,7 +5910,7 @@ mod tests {
             outcome_line.contains("\"pid_confirmed\":false"),
             "{outcome_line}"
         );
-        let state = journal::replay(&path);
+        let state = journal::replay_checked(&path).unwrap_or_default();
         assert!(
             state.pending_spawns.is_empty(),
             "失败 outcome 同样关闭未知实例窗口"

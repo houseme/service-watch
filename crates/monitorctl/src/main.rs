@@ -309,13 +309,7 @@ fn percent_encode_path_segment(s: &str) -> String {
 /// `metrics`:GET /metrics;--prom 时请求 Prometheus 文本并原样输出，
 /// 否则 pretty JSON(按关键字段摘要 + 完整 JSON 两种形态？—— 输出完整 JSON)。
 async fn cmd_metrics(base: &str, prom: bool, token: Option<&str>, insecure: bool) -> i32 {
-    let client = match build_client(insecure) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("client build failed: {e}");
-            return 2;
-        }
-    };
+    let client = client_or_exit(insecure);
     let url = format!(
         "{}/metrics{}",
         base.trim_end_matches('/'),
@@ -356,14 +350,9 @@ async fn cmd_metrics(base: &str, prom: bool, token: Option<&str>, insecure: bool
 
 /// `status`:GET /status;人类可读表格，--json 原样输出。
 async fn cmd_status(base: &str, json: bool, token: Option<&str>, insecure: bool) -> i32 {
-    let client = match build_client(insecure) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("http client error: {e}");
-            return 2;
-        }
-    };
-    let body = match fetch_status_text(&client, base, token).await {
+    let client = client_or_exit(insecure);
+    let url = format!("{}/status", base.trim_end_matches('/'));
+    let body = match fetch_text(&client, &url, token).await {
         Ok(text) => text,
         Err(e) => {
             eprintln!("{e}");
@@ -419,39 +408,32 @@ impl std::fmt::Display for FetchStatusError {
     }
 }
 
-/// GET `{base}/status`,成功返回响应文本;错误分类见 [`FetchStatusError`]。
-async fn fetch_status_text(
+/// GET `{url}` 并取响应文本 (status/journal/config 三路共用);错误分类见
+/// [`FetchStatusError`]:连接失败 → Unreachable (退出码 4),读体失败 → Body,
+/// 非 2xx → Http。
+async fn fetch_text(
     client: &reqwest::Client,
-    base: &str,
+    url: &str,
     token: Option<&str>,
 ) -> Result<String, FetchStatusError> {
-    let url = format!("{}/status", base.trim_end_matches('/'));
-    match with_auth(client.get(&url), token).send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            match resp.text().await {
-                Ok(text) if status.is_success() => Ok(text),
-                Ok(_) => Err(FetchStatusError::Http(status.as_u16())),
-                Err(e) => Err(FetchStatusError::Body(format!(
-                    "read response body failed: {e}"
-                ))),
-            }
-        }
-        Err(e) => Err(FetchStatusError::Unreachable(format!(
-            "agent unreachable ({url}): {e}"
-        ))),
+    let resp = with_auth(client.get(url), token)
+        .send()
+        .await
+        .map_err(|e| FetchStatusError::Unreachable(format!("agent unreachable ({url}): {e}")))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| FetchStatusError::Body(format!("read response body failed: {e}")))?;
+    if !status.is_success() {
+        return Err(FetchStatusError::Http(status.as_u16()));
     }
+    Ok(text)
 }
 
 /// `restart|check|reset`:POST /v1/{op}/{target};非 2xx → 2(409 附提示),连接失败 → 4。
 async fn cmd_post(base: &str, op: &str, target: &str, token: Option<&str>, insecure: bool) -> i32 {
-    let client = match build_client(insecure) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("http client error: {e}");
-            return 2;
-        }
-    };
+    let client = client_or_exit(insecure);
     let url = format!(
         "{}/v1/{op}/{}",
         base.trim_end_matches('/'),
@@ -464,34 +446,27 @@ async fn cmd_post(base: &str, op: &str, target: &str, token: Option<&str>, insec
             return 4;
         }
     };
-    let status = resp.status().as_u16();
-    if (200..300).contains(&status) {
-        println!("{op} {target}: accepted ({status})");
-        0
-    } else if status == 409 {
-        eprintln!(
-            "{op} {target}: rejected ({status}); target is in fatal state — run `monitorctl reset {target}` first"
-        );
-        2
-    } else if status == 401 {
-        eprintln!("{op} {target}: agent returned HTTP 401 ({AUTH_HINT})");
-        2
-    } else {
-        eprintln!("{op} {target}: agent returned HTTP {status}");
-        2
-    }
+    // 409 = Fatal 闩锁:附 reset 处置长提示 (silence/unsilence 无此提示)。
+    let fatal_hint = format!("; target is in fatal state — run `monitorctl reset {target}` first");
+    report_op_response(op, target, resp, &fatal_hint).await
 }
 
-/// 命令类请求的响应处置 (silence/unsilence 与 cmd_post 同语义，共用本函数):
-/// 2xx → `op label: accepted (status)` + 0;409 → 提示 + 2;401 → AUTH_HINT + 2;
+/// 命令类请求的响应处置 (restart/check/reset 与 silence/unsilence 共用):
+/// 2xx → `op label: accepted (status)` + 0;409 → rejected + 2 (`fatal_hint`
+/// 由调用方附加,cmd_post 传 fatal 处置长提示);401 → AUTH_HINT + 2;
 /// 其余非 2xx → 2。
-async fn report_op_response(op: &str, label: &str, resp: reqwest::Response) -> i32 {
+async fn report_op_response(
+    op: &str,
+    label: &str,
+    resp: reqwest::Response,
+    fatal_hint: &str,
+) -> i32 {
     let status = resp.status().as_u16();
     if (200..300).contains(&status) {
         println!("{op} {label}: accepted ({status})");
         0
     } else if status == 409 {
-        eprintln!("{op} {label}: rejected ({status})");
+        eprintln!("{op} {label}: rejected ({status}){fatal_hint}");
         2
     } else if status == 401 {
         eprintln!("{op} {label}: agent returned HTTP 401 ({AUTH_HINT})");
@@ -513,13 +488,7 @@ async fn cmd_silence(
     token: Option<&str>,
     insecure: bool,
 ) -> i32 {
-    let client = match build_client(insecure) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("http client error: {e}");
-            return 2;
-        }
-    };
+    let client = client_or_exit(insecure);
     let url = format!(
         "{}/v1/silence/{}",
         base.trim_end_matches('/'),
@@ -531,7 +500,7 @@ async fn cmd_silence(
         None => serde_json::json!({ "duration": duration }),
     };
     match with_auth(client.post(&url).json(&body), token).send().await {
-        Ok(resp) => report_op_response("silence", target, resp).await,
+        Ok(resp) => report_op_response("silence", target, resp, "").await,
         Err(e) => {
             eprintln!("agent unreachable ({url}): {e}");
             4
@@ -541,20 +510,14 @@ async fn cmd_silence(
 
 /// `unsilence`(F27):DELETE /v1/silence/{target} 提前解除静默。
 async fn cmd_unsilence(base: &str, target: &str, token: Option<&str>, insecure: bool) -> i32 {
-    let client = match build_client(insecure) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("http client error: {e}");
-            return 2;
-        }
-    };
+    let client = client_or_exit(insecure);
     let url = format!(
         "{}/v1/silence/{}",
         base.trim_end_matches('/'),
         percent_encode_path_segment(target)
     );
     match with_auth(client.delete(&url), token).send().await {
-        Ok(resp) => report_op_response("unsilence", target, resp).await,
+        Ok(resp) => report_op_response("unsilence", target, resp, "").await,
         Err(e) => {
             eprintln!("agent unreachable ({url}): {e}");
             4
@@ -619,25 +582,14 @@ fn journal_query_url(
     url
 }
 
-/// 拉取 /v1/journal 并解码 (journal 与错误分类复用 [`FetchStatusError`],
-/// 退出码映射与 status 一致：不可达 4 / 其余 2)。
+/// 拉取 /v1/journal 并解码 (传输/错误分类复用 [`fetch_text`],退出码映射与
+/// status 一致：不可达 4 / 其余 2)。
 async fn fetch_journal_reply(
     client: &reqwest::Client,
     url: &str,
     token: Option<&str>,
 ) -> Result<JournalReply, FetchStatusError> {
-    let resp = with_auth(client.get(url), token)
-        .send()
-        .await
-        .map_err(|e| FetchStatusError::Unreachable(format!("agent unreachable ({url}): {e}")))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| FetchStatusError::Body(format!("read response body failed: {e}")))?;
-    if !status.is_success() {
-        return Err(FetchStatusError::Http(status.as_u16()));
-    }
+    let text = fetch_text(client, url, token).await?;
     JournalReply::parse(&text)
         .map_err(|e| FetchStatusError::Decode(format!("decode /v1/journal response failed: {e}")))
 }
@@ -706,13 +658,7 @@ async fn cmd_journal(
     token: Option<&str>,
     insecure: bool,
 ) -> i32 {
-    let client = match build_client(insecure) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("http client error: {e}");
-            return 2;
-        }
-    };
+    let client = client_or_exit(insecure);
     let url = journal_query_url(base, tail, target, event_type, since);
     let reply = match fetch_journal_reply(&client, &url, token).await {
         Ok(r) => r,
@@ -745,41 +691,13 @@ async fn cmd_journal(
 /// 占位**不可回灌** (写回配置文件会把字面量当作真实密钥)。
 const REDACTED_NOTE: &str = "note: ***redacted*** = agent 已脱敏的敏感值 (control token / webhook 签名密钥),明文仅存于 agent 配置文件;该占位不可回灌配置\n";
 
-/// 拉取 /v1/config 原始文本 (错误分类复用 [`FetchStatusError`],退出码映射
-/// 与 status/journal 一致：不可达 4 / 401 复用 token 提示 / 其余 2)。
-async fn fetch_config_text(
-    client: &reqwest::Client,
-    url: &str,
-    token: Option<&str>,
-) -> Result<String, FetchStatusError> {
-    let resp = with_auth(client.get(url), token)
-        .send()
-        .await
-        .map_err(|e| FetchStatusError::Unreachable(format!("agent unreachable ({url}): {e}")))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| FetchStatusError::Body(format!("read response body failed: {e}")))?;
-    if !status.is_success() {
-        return Err(FetchStatusError::Http(status.as_u16()));
-    }
-    Ok(text)
-}
-
 /// `config`(F33):GET /v1/config 生效配置查看。默认表格渲染
 /// ([`render_config_table`]:顶层段键值 + maintenance/routes 等列表逐行，
 /// `***redacted***` 占位原样展示并附注脚);`--json` 原样 pretty JSON。
 async fn cmd_config(base: &str, json: bool, token: Option<&str>, insecure: bool) -> i32 {
-    let client = match build_client(insecure) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("http client error: {e}");
-            return 2;
-        }
-    };
+    let client = client_or_exit(insecure);
     let url = format!("{}/v1/config", base.trim_end_matches('/'));
-    let text = match fetch_config_text(&client, &url, token).await {
+    let text = match fetch_text(&client, &url, token).await {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
@@ -955,13 +873,8 @@ async fn cmd_watch(
     token: Option<&str>,
     insecure: bool,
 ) -> i32 {
-    let client = match build_client(insecure) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("http client error: {e}");
-            return 2;
-        }
-    };
+    let client = client_or_exit(insecure);
+    let status_url = format!("{}/status", base.trim_end_matches('/'));
     // tokio ≥1.4x:ctrl_c() 直接返回 Future(Output = io::Result<()>),pin 后供 select 复用。
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
@@ -980,7 +893,7 @@ async fn cmd_watch(
                 }
                 return 0;
             }
-            res = fetch_status_text(&client, base, token) => res,
+            res = fetch_text(&client, &status_url, token) => res,
         };
         match outcome {
             Ok(text) => match serde_json::from_str::<StatusReport>(&text) {
@@ -1222,6 +1135,18 @@ fn resolve_client_identity(
 /// 构建共享 HTTP 客户端 (5s 超时)。F32:`insecure = true` 时跳过 TLS 证书
 /// 校验 (`danger_accept_invalid_certs`),仅自签/测试场景 —— 生产部署应信任
 /// agent 证书的 CA(自签 CA 安装见 docs/RUNBOOK);对 http:// URL 无影响。
+/// build_client 的 CLI 出口:构建失败打印错误并以退出码 2 终止
+/// (全部命令一致 —— 客户端不可用属运行错误,DESIGN §9.3)。
+fn client_or_exit(insecure: bool) -> reqwest::Client {
+    match build_client(insecure) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("http client error: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// `https://` 支持来自 reqwest rustls feature(与 agent 端 axum-server 同线)。
 /// F38:`CLIENT_IDENTITY` 已配置时附带 mTLS 客户端证书 (agent 端
 /// client_ca_cert 校验场景;远程运维/测试用)。
@@ -1541,13 +1466,15 @@ mod tests {
 
         let client = build_client(false).unwrap();
         let base = format!("http://{addr}");
-        let body = fetch_status_text(&client, &base, Some(&token))
+        let url = format!("{}/status", base.trim_end_matches('/'));
+        let body = fetch_text(&client, &url, Some(&token))
             .await
             .expect("authorized request must succeed");
         assert!(body.contains("\"targets\":[]"));
 
         // 不带 token:stub 校验 Authorization 缺失 → 401 → Http(401)(提示文案)
-        let err = fetch_status_text(&client, &base, None)
+        let url = format!("{}/status", base.trim_end_matches('/'));
+        let err = fetch_text(&client, &url, None)
             .await
             .expect_err("unauthenticated request must fail");
         match err {
@@ -2035,10 +1962,10 @@ mod tests {
     }
 
     /// 端到端 (F33):手写 TCP stub 返回 `GET /v1/config` 的脱敏快照 ——
-    /// 拉取 (fetch_config_text) → 解码 → 表格渲染全链路;401 复用 token 提示
+    /// 拉取 (fetch_text) → 解码 → 表格渲染全链路;401 复用 token 提示
     /// 分类;响应体中的明文密钥只出现在 stub 侧 (客户端渲染为占位)。
     #[tokio::test]
-    async fn fetch_config_text_and_render_stub_roundtrip() {
+    async fn fetch_text_config_and_render_stub_roundtrip() {
         let body = r#"{"control":{"token":"***redacted***","listen":"127.0.0.1:9170"},"maintenance":[{"name":"nightly","targets":["*"],"start_utc":"18:30","duration":"30m"}],"alert":{"webhook_secret":"***redacted***","routes":[]}}"#;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2080,7 +2007,7 @@ mod tests {
 
         let client = build_client(false).unwrap();
         let base = format!("http://{addr}");
-        let text = fetch_config_text(&client, &format!("{base}/v1/config"), Some("tok"))
+        let text = fetch_text(&client, &format!("{base}/v1/config"), Some("tok"))
             .await
             .expect("stub config must fetch");
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -2094,7 +2021,7 @@ mod tests {
         assert!(!rendered.contains("明文不应出现"));
 
         // 无 token 请求 401 路径 → Http(401)(AUTH_HINT 文案)
-        let err = fetch_config_text(&client, &format!("{base}/v1/config"), None)
+        let err = fetch_text(&client, &format!("{base}/v1/config"), None)
             .await
             .expect_err("second stub connection replies 401");
         match err {

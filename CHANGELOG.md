@@ -5,6 +5,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x
 
 ## [Unreleased]
 
+### 2026-11-18 第十八轮评审与冗余精简 (lib API 破坏性变更)
+
+评审 (主会话全路径深评 + 双代理):无 P0/P1;修复 metrics_history 半行定界文档滞后 (模块 doc/ROADMAP F39/DESIGN §10 与第十四轮修复后代码矛盾)、ROADMAP F38 标题整段重复 (3dab217 引入的漏网回归) 与遗留人工项状态矛盾、release.yml stage 注释过时 (darwin 矩阵已恢复)。
+
+冗余精简 (「禁层层包裹」原则落地,净删约 290 行;**lib API 破坏性变更**):
+
+- **移除的 pub API**: `journal::run_writer` / 4 参 `run_tracked_writer` / `journal::replay`、`JournalSender: From<mpsc::Sender<JournalEvent>>` (Untracked 兼容通道层整体删除 —— `try_send`/`send` 不再有双通道分支,`JournalSender` 直接持有产品通道)、`spool::replay` (恒真包装)、`control::serve` 非 control-http 占位、`control::gen1_query_path` (纯转发)、`recover::WatchedPids`、`BudgetWindow::to_wall`、`Backoff::attempt`、`OrphanTracker::observation`、`CollectOutput::find`、`AlertQueue::len_inner`、`impl Default for Thresholds`、`WebhookNotifier::signature_header` (内联共享 helper);`JournalRequest.event` 改 pub (随 `channel()` 公共签名可见)。
+- **去重提取**: journal `Reset`/`ResetTargets` 共用 `reset_one`;`rank` 双定义下沉 `HealthLevel::rank()`;eval `build_status` 服务/watch 段共用 `aggregate_checks`;`resolve_process_target` 四处身份采纳块提取 `adopt_observed`;control `merged_metrics` 改为 **eval 报告反向基座** (只覆盖 3 个 alert 字段,新增 MetricsReport 字段自动透传 —— 根除第九轮 P2 漏拷字段的缺陷类型);`render_prometheus` 表驱动循环 (输出逐字节不变);monitorctl `fetch_text` 统一 status/journal/config 三路 GET、`report_op_response` 吸收 `cmd_post` 响应臂 (409 长提示参数化)、`client_or_exit` 收敛 8 处构建样板。
+- **测试改造**: journal/eval/集成测试全部改走产品 writer 入口与 `journal::channel()` (eval 测试助手新增 writer 替身:drain + ack + 转发);删除 webhook 重复签名断言与 gen1 对拍测试 (单一事实源后无漂移面)。
+
+验证: fmt / clippy -D warnings 零警告;全测 369 通过 (lib 288 + 16 集成套件 + monitorctl 26,较上轮 -2 为删除的重复测试);三条 no-default feature 组合编译通过。
+
 ### 2026-11-18 macOS runner 恢复 (macos-14 镜像退役换 macos-15)
 
 - ci.yml test 矩阵 `macos-14` → `macos-15`:macos-14 镜像 2026-11-02 从 GitHub Actions 机队退役 (报 `configuration 'macos-14-arm64-us-default' is not supported`;此前「runner 池枯竭」即退役过渡期表现)。

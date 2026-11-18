@@ -15,7 +15,6 @@ pub mod policy;
 pub mod process;
 pub mod reconcile;
 
-use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::HungAction;
@@ -811,9 +810,6 @@ impl RecoveryFsm {
         }
     }
 }
-
-/// 检查目标 → supervise 服务的关联表项 (eval 维护;此处仅类型占位)。
-pub type WatchedPids = VecDeque<ProcessIdentity>;
 
 #[cfg(test)]
 mod tests {

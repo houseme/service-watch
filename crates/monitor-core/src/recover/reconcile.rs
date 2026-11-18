@@ -58,18 +58,13 @@ impl OrphanTracker {
         self.identity
     }
 
-    /// 最近一次对账结果。
-    pub fn observation(&self) -> OrphanObservation {
-        self.observation
-    }
-
     /// 当前是否已确认只读接管。
     pub fn is_attached(&self) -> bool {
         matches!(self.observation, OrphanObservation::Attached(_))
     }
 
-    /// 当前是否已确认原身份消失。
-    pub fn is_gone(&self) -> bool {
+    /// 当前是否已确认原身份消失 (仅模块内消费:observe 的免重复判定)。
+    fn is_gone(&self) -> bool {
         self.observation == OrphanObservation::Gone
     }
 
