@@ -52,19 +52,23 @@ jobs:
             target: x86_64-unknown-linux-gnu
             agent_features: collect-deep-hardware
           # macOS runner 池连续 7h+ 枯竭(latest/13/14 全部未分配)→
-          # 改为 Linux runner 交叉产出 macOS 包:feature 降级为
-          # collect-sysinfo(无 C 依赖,HTTP 探测/webhook/metrics/deep-hardware
-          # 缺失,release notes 注明);原生 macOS 构建待 runner 恢复后重跑补齐。
+          # 改为 container 交叉产出 macOS 包:ghcr 镜像自带 macOS SDK + zig
+          # (框架链接必需,SDKROOT 自动探测);feature 降级为 collect-sysinfo
+          # (HTTP 探测/webhook/metrics/deep-hardware 缺失,release notes 注明);
+          # 原生 macOS 构建待 runner 恢复后重跑补齐。
           - os: ubuntu-latest
             target: aarch64-apple-darwin
             agent_features: collect-sysinfo
+            container: ghcr.io/rust-cross/cargo-zigbuild:0.19.0
           - os: ubuntu-latest
             target: x86_64-apple-darwin
             agent_features: collect-sysinfo
+            container: ghcr.io/rust-cross/cargo-zigbuild:0.19.0
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             agent_features: windows-service,monitor-core/scm-target,collect-deep-hardware
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container || null }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -75,20 +79,19 @@ jobs:
         run: choco install -y nasm cmake
       - if: runner.os == 'Windows'
         run: echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV
+      # macOS 交叉 job:自带 macOS SDK 的 cargo-zigbuild 镜像(框架链接必需)
       - name: build
         shell: bash
         run: |
-          # macOS 交叉 job:rustc 的 cc 链接苹果目标需要 Apple SDK(Linux 无)。
-          # 用 cargo-zigbuild(zig linker)可交叉链接 macOS —— 实测可行。
-          # 同时补 --no-default-features(默认 http 系拉 aws-lc-sys,其 build
-          # script 的 cc 探测在交叉环境必败)。原生平台保留默认 features。
-          if [ "${{ runner.os }}" = "Linux" ] && [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
-            pip3 install --quiet cargo-zigbuild==0.19.0 2>/dev/null || pip3 install --quiet cargo-zigbuild
+          # macOS 交叉 job(在自带 macOS SDK 的 container 内):zigbuild +
+          # --no-default-features(默认 http 系拉 aws-lc-sys,其 cc 探测在
+          # 交叉环境必败)。原生平台保留默认 features。
+          if [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
             cargo zigbuild --release -p monitor-agent --target ${{ matrix.target }} --no-default-features --features "${{ matrix.agent_features }}"
           else
             cargo build --release -p monitor-agent --target ${{ matrix.target }} --features "${{ matrix.agent_features }}"
           fi
-          if [ "${{ runner.os }}" = "Linux" ] && [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
+          if [[ "${{ matrix.target }}" == *apple-darwin* ]]; then
             cargo zigbuild --release -p monitorctl --target ${{ matrix.target }} --no-default-features --features collect-sysinfo
           else
             cargo build --release -p monitorctl --target ${{ matrix.target }} --features collect-deep-hardware
