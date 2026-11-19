@@ -5,6 +5,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/); versioning: 0.x
 
 ## [Unreleased]
 
+### 2026-11-20 第十九轮评审修复 (安全/观测出口 + 并发卫生)
+
+评审 (主会话亲审全仓 + 双代理:特性组合矩阵 20 组合对、并发六专项):无 P0;P1×1/P2×1/P3×13 全部修复。组合矩阵与并发专项中 16 组合对、Notify/select 全部 14 处形态确认正确,历轮 P0 高发的状态机跨域面本轮闭合。
+
+- **[P1] F37 投递头值纳入脱敏**:`Config::redacted()` 原先只覆盖 token/webhook_secret/routes[].secret/metrics.secret —— `[alert] headers` 与 `routes[].headers` 的值 (文档化凭据注入口,官方示例即 `Authorization = "Bearer ..."`) 经 `GET /v1/config` 明文带出。现头名保留、值一律 `***redacted***` 占位;端点响应/monitorctl 注脚/DESIGN/RUNBOOK 口径同步。
+- **[P2] alert 三计数随 eval 报告发布**:`build_metrics` 对 `alerts_sent`/`alert_delivery_failures`/`alerts_dropped` 零赋值,F18 `/metrics/history` 环、F39 历史落盘、F34 推送 body 三出口恒 0 (仅 `/metrics` 瞬时端点经覆盖层显示真实值)。现经 `AlertQueue::counters()` 访问器直填,三出口与瞬时端点同源;/metrics 覆盖层保留为实时刷新职责。
+- **[P3] Reset 命令口径统一**:check/watch 目标的 journal Reset 从 `try_send` 改为与 service 目标一致的 `send().await` 确认 —— 旧路径在队列拥塞时触发 critical 失败闩锁 (agent PersistenceFailed 停机) 且内存侧清除已生效。
+- **[P3] spawn_blocking 对齐**:启动 journal 重放 (`replay_checked`,两代全量读入,`journal_max_size=0` 时无界) 与 reload 配置读取+校验 (含 2×canonicalize) 移入 `spawn_blocking` —— eval 单写者不再可能被慢盘/挂起文件系统冻结。
+- **[P3] history_path 碰撞守卫补 spool 临时文件**:`pending.jsonl.next` (spool 确认事务的 rename 中转名,常量化 `SPOOL_TEMP_FILE` 单一事实源) 加入保留路径表。
+- **[P3] 装配期明文警示**:配置 Bearer token 而未配 TLS 时 WARN 一条 (token 明文过网,loopback 场景可接受但应可见)。
+- **[P3] `[metrics]` interval 下界**:enabled 时 ≥ 100ms (与 check/collect 同款负载源防护),DESIGN §4.3 同步。
+- **[P3] reload 剪除失效静默**:被删 target 的 silence 条目不再滞留至 TTL 到期 (不可见) —— 同名 target 重新加入时不会复活旧静默;剪除逐条写审计,重定义 (同名保留) 不受影响。
+- **[P3] 观测语义文档化**:http 探测跟随重定向 (≤10 跳,302 链终点判 OK;与 webhook 投递禁重定向的对比入 DESIGN §4.3/config.example)、deadman 首拍立即为有意语义、SCM query 同步 RPC 热路径取舍、eval 停机 abort detach 在途任务的有界尾巴 —— 分别在对应模块 doc/DESIGN 注记。
+- **[P3] monitorctl `cmd_metrics` 复用 `fetch_text`** (错误分类与退出码同语义,删手写重复分支);control 无 control-http 组合下 2 处条件性未用 import 加 cfg 门控。
+
+新增 API (additive,无破坏性变更):`AlertQueue::counters()`、`spool::SPOOL_TEMP_FILE`。验证:fmt/clippy -D warnings 零警告;全测 364 通过 (基线 362 + 新增 `tick_metrics_carries_alert_counters`/`reload_prunes_silences_of_removed_targets`);三条 no-default feature 组合编译零警告。
+
 ### 2026-11-18 第十八轮评审与冗余精简 (lib API 破坏性变更)
 
 评审 (主会话全路径深评 + 双代理):无 P0/P1;修复 metrics_history 半行定界文档滞后 (模块 doc/ROADMAP F39/DESIGN §10 与第十四轮修复后代码矛盾)、ROADMAP F38 标题整段重复 (3dab217 引入的漏网回归) 与遗留人工项状态矛盾、release.yml stage 注释过时 (darwin 矩阵已恢复)。

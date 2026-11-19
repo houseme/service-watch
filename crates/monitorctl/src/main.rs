@@ -157,7 +157,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// 查看生效配置 (GET /v1/config;F33,脱敏快照:token/签名密钥以
+    /// 查看生效配置 (GET /v1/config;F33,脱敏快照:token/签名密钥/投递头值以
     /// `***redacted***` 占位，明文不出 agent;占位不可回灌配置文件)
     Config {
         /// 原样输出 agent 返回的 JSON
@@ -307,7 +307,8 @@ fn percent_encode_path_segment(s: &str) -> String {
 }
 
 /// `metrics`:GET /metrics;--prom 时请求 Prometheus 文本并原样输出，
-/// 否则 pretty JSON(按关键字段摘要 + 完整 JSON 两种形态？—— 输出完整 JSON)。
+/// 否则 pretty JSON。拉取与错误分类复用 [`fetch_text`] (第十九轮评审 P3:
+/// 原先手写的同语义错误分支收敛到共享出口 —— 退出码映射完全一致)。
 async fn cmd_metrics(base: &str, prom: bool, token: Option<&str>, insecure: bool) -> i32 {
     let client = client_or_exit(insecure);
     let url = format!(
@@ -315,37 +316,22 @@ async fn cmd_metrics(base: &str, prom: bool, token: Option<&str>, insecure: bool
         base.trim_end_matches('/'),
         if prom { "?format=prometheus" } else { "" }
     );
-    match with_auth(client.get(&url), token).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.text().await {
-            Ok(text) => {
-                if prom {
-                    println!("{text}");
-                } else {
-                    match serde_json::from_str::<serde_json::Value>(&text) {
-                        Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or(text)),
-                        Err(_) => println!("{text}"),
-                    }
-                }
-                0
-            }
-            Err(e) => {
-                eprintln!("read body failed: {e}");
-                2
-            }
-        },
-        Ok(resp) if resp.status().as_u16() == 401 => {
-            eprintln!("agent /metrics: 401 ({AUTH_HINT})");
-            2
-        }
-        Ok(resp) => {
-            eprintln!("agent /metrics: {}", resp.status());
-            2
-        }
+    let text = match fetch_text(&client, &url, token).await {
+        Ok(text) => text,
         Err(e) => {
-            eprintln!("agent unreachable ({url}): {e}");
-            4
+            eprintln!("{e}");
+            return e.exit_code();
+        }
+    };
+    if prom {
+        println!("{text}");
+    } else {
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or(text)),
+            Err(_) => println!("{text}"),
         }
     }
+    0
 }
 
 /// `status`:GET /status;人类可读表格，--json 原样输出。
@@ -689,7 +675,7 @@ async fn cmd_journal(
 
 /// `***redacted***` 占位注脚 (F33):值原样展示，含义在此注明 ——
 /// 占位**不可回灌** (写回配置文件会把字面量当作真实密钥)。
-const REDACTED_NOTE: &str = "note: ***redacted*** = agent 已脱敏的敏感值 (control token / webhook 签名密钥),明文仅存于 agent 配置文件;该占位不可回灌配置\n";
+const REDACTED_NOTE: &str = "note: ***redacted*** = agent 已脱敏的敏感值 (control token / webhook 签名密钥 / 投递头值),明文仅存于 agent 配置文件;该占位不可回灌配置\n";
 
 /// `config`(F33):GET /v1/config 生效配置查看。默认表格渲染
 /// ([`render_config_table`]:顶层段键值 + maintenance/routes 等列表逐行，

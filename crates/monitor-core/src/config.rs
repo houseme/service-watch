@@ -686,27 +686,36 @@ impl Config {
         Self::from_toml_str(&s)
     }
 
-    /// DESIGN.md §4.3 交叉校验。返回全部违规项 (一次性报完，便于用户修正)。
     /// F33:生效配置视图 —— 敏感字段 (control.token / webhook_secret / 路由级
     /// secret) 以 `***redacted***` 占位，其余字段原样。供 `GET /v1/config` 与
     /// monitorctl 使用;序列化输出结构与 TOML schema 一致，占位值不会通过
     /// 二次校验 (仅供展示，不可回灌)。
     pub fn redacted(&self) -> Config {
+        const REDACTED: &str = "***redacted***";
         let mut cfg = self.clone();
         if cfg.control.token.is_some() {
-            cfg.control.token = Some("***redacted***".into());
+            cfg.control.token = Some(REDACTED.into());
         }
         if cfg.alert.webhook_secret.is_some() {
-            cfg.alert.webhook_secret = Some("***redacted***".into());
+            cfg.alert.webhook_secret = Some(REDACTED.into());
+        }
+        // F37: delivery headers are the documented credential injection point
+        // ("receiver auth token etc.") — same redaction discipline as secrets:
+        // header names stay visible for structure, values are placeholdered.
+        for value in cfg.alert.headers.values_mut() {
+            *value = REDACTED.into();
         }
         for route in &mut cfg.alert.routes {
             if route.secret.is_some() {
-                route.secret = Some("***redacted***".into());
+                route.secret = Some(REDACTED.into());
+            }
+            for value in route.headers.values_mut() {
+                *value = REDACTED.into();
             }
         }
         if cfg.metrics.secret.is_some() {
             // F34:推送签名密钥与 webhook 同口径 —— 明文不出 /v1/config。
-            cfg.metrics.secret = Some("***redacted***".into());
+            cfg.metrics.secret = Some(REDACTED.into());
         }
         cfg
     }
@@ -1111,11 +1120,18 @@ impl Config {
             let hp_norm = std::fs::canonicalize(hp).unwrap_or_else(|_| hp.clone());
             let journal = self.agent.data_dir.join("journal.jsonl");
             let journal_gen1 = crate::recover::journal::gen1_path(&journal);
-            let spool = self.agent.data_dir.join("spool/pending.jsonl");
+            // Round-19 review P3: the spool ack transaction renames through
+            // pending.jsonl.next — it is part of the reserved path surface
+            // (a history writer holding it open breaks the rename on Windows
+            // and double-writes the file everywhere else).
+            let spool_dir = self.agent.data_dir.join("spool");
+            let spool = spool_dir.join(crate::alert::spool::SPOOL_FILE);
+            let spool_temp = spool_dir.join(crate::alert::spool::SPOOL_TEMP_FILE);
             for (label, reserved) in [
                 ("journal.jsonl", journal),
                 ("journal.1.jsonl", journal_gen1),
                 ("spool/pending.jsonl", spool),
+                ("spool/pending.jsonl.next", spool_temp),
             ] {
                 let r_norm = std::fs::canonicalize(&reserved).unwrap_or_else(|_| reserved.clone());
                 if hp_norm == r_norm {
@@ -1339,6 +1355,17 @@ impl Config {
                     ),
                 );
             }
+            // Round-19 review P3: same load-source floor as check/collect —
+            // a 1ms push interval turns the pusher itself into the load.
+            if self.metrics.interval < Duration::from_millis(100) {
+                say(
+                    &mut errs,
+                    format!(
+                        "[metrics] interval ({:?}) must be >= 100ms",
+                        self.metrics.interval
+                    ),
+                );
+            }
         }
 
         // name 唯一 (三个空间独立)
@@ -1413,8 +1440,10 @@ mod tests {
             "[alert]\nheaders = { 'X-Inj' = \"line1\\nline2\" }",
             "[alert]\nheaders = { 'X-A' = '1' }\n[[alert.routes]]\nmatch = '*'\nurl = 'http://e/h'\nheaders = { 'x-a' = '2' }",
             "[metrics]\nhistory_path = './data/journal.jsonl'",
+            "[metrics]\nhistory_path = './data/spool/pending.jsonl.next'",
             "[control]\nclient_ca_cert = 'ca.pem'",
             "[metrics]\nhistory_path = ''",
+            "[metrics]\nenabled = true\nurl = 'http://ep/push'\ninterval = '50ms'",
             "[[maintenance]]\ntargets = []\nstart_utc = '02:00'",
             "[[maintenance]]\ntargets = ['*']\nstart_utc = '24:00'",
             "[[maintenance]]\ntargets = ['*']\nstart_utc = '2:00'",
@@ -1458,7 +1487,8 @@ mod tests {
     fn parses_v06_fields_and_redacts_secrets() {
         let cfg = Config::from_toml_str(
             "[control]\ntls_cert = 'c.pem'\ntls_key = 'k.pem'\ntoken = 'tok'\n\
-             [alert]\nwebhook_secret = 'sec'\n[[alert.routes]]\nmatch = 'edge'\nurl = 'http://e/h'\nsecret = 'rs'\n\
+             [alert]\nwebhook_secret = 'sec'\nheaders = { Authorization = 'Bearer h' }\n\
+             [[alert.routes]]\nmatch = 'edge'\nurl = 'http://e/h'\nsecret = 'rs'\nheaders = { 'X-Team' = 'edge-v' }\n\
              [metrics]\nenabled = true\nurl = 'http://p/ingest'\nsecret = 'push'\n\
              [[maintenance]]\nname = 'nightly'\ntargets = ['*']\nstart_utc = '18:30'\nduration = '30m'\ndays = ['mon', 'fri']",
         )
@@ -1478,9 +1508,24 @@ mod tests {
         assert_eq!(r.alert.webhook_secret.as_deref(), Some("***redacted***"));
         assert_eq!(r.alert.routes[0].secret.as_deref(), Some("***redacted***"));
         assert_eq!(r.metrics.secret.as_deref(), Some("***redacted***"));
+        // F37:header 值是文档化凭据注入口 —— 值占位、头名保留 (结构可读)。
+        assert_eq!(
+            r.alert.headers.get("Authorization").map(String::as_str),
+            Some("***redacted***"),
+            "全局投递头值必须占位"
+        );
+        assert_eq!(
+            r.alert.routes[0].headers.get("X-Team").map(String::as_str),
+            Some("***redacted***"),
+            "路由投递头值必须占位"
+        );
         assert!(
             !serde_json::to_string(&r).unwrap().contains("push"),
             "明文推送密钥不得出现在视图"
+        );
+        assert!(
+            !serde_json::to_string(&r).unwrap().contains("Bearer h"),
+            "明文凭据头不得出现在视图"
         );
         assert_eq!(
             r.control.tls_cert,

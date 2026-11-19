@@ -60,6 +60,12 @@
 //! 本任务**不自行退出**:`control_rx.recv()` 返回 `None`(runtime drop 了 sender)
 //! 与 `snapshot_rx.changed()` Err 都不算停机信号，仅停用对应 select 分支;停机由
 //! runtime abort 本任务完成 (DESIGN §2.2:runtime 负责装配与停机顺序)。
+//!
+//! abort 会 detach 全部在途 probe / activate 钩子任务(JoinHandle 随任务整体
+//! Drop = detach;reload 删除路径有显式 abort,停机路径没有)。尾巴有界:两类
+//! 任务都受各自 `timeout` 约束,结果无人消费;仅 activate 钩子的子命令进程可能
+//! 短暂存活到进程退出(`process::exit` 不执行 Drop,`kill_on_drop` 不触发)。
+//! 如实记录为可接受尾巴 (第十九轮评审 P3)。
 
 pub mod check;
 pub mod incident;
@@ -1106,6 +1112,11 @@ impl Scheduler {
         self.degradations_prev_present = Some(now_degraded);
 
         let js = h.journal_tx.counters().snapshot();
+        // Alert pipeline counters (round-19 review P2): fill the three alert
+        // fields so the F18 ring / F39 history file / F34 push body carry real
+        // values instead of the zero defaults — previously only the live
+        // /metrics endpoint (merged_metrics overlay) reported them.
+        let alert_counters = h.alert.counters().to_metrics();
         let mut m = crate::model::control::MetricsReport {
             probe_executed: self.checks.iter().map(|c| c.executed).sum(),
             probe_skipped: self.checks.iter().map(|c| c.skipped).sum(),
@@ -1119,6 +1130,9 @@ impl Scheduler {
             degradations_current: snap.hardware.degradations.len() as u64,
             degradations_events: self.degradations_events,
             last_collect_at: Some(snap.hardware.timestamp),
+            alerts_sent: alert_counters.alerts_sent,
+            alert_delivery_failures: alert_counters.alert_delivery_failures,
+            alerts_dropped: alert_counters.alerts_dropped,
             // F18:发布出去的报告携带环形缓冲句柄 (control 侧只读快照入口)。
             history: self.metrics_history.clone(),
             ..Default::default()
@@ -2308,30 +2322,45 @@ impl Scheduler {
                     self.exec_actions(sidx, actions, now_mono, now_wall, h)
                         .await;
                 } else if let Some(i) = self.checks.iter().position(|c| c.cfg.name == target) {
-                    let (t, c) = self.labels(i);
-                    self.tracker.clear(&t, &c);
-                    journal(
-                        h,
-                        JournalEvent::Reset {
+                    // Round-19 review P3: Reset is a critical journal event —
+                    // await confirmation like the service-target branch. The
+                    // old try_send path could latch counters.fail() on a
+                    // congested queue (agent shuts down with
+                    // PersistenceFailed) while the in-memory clear had
+                    // already taken effect.
+                    if let Err(e) = h
+                        .journal_tx
+                        .send(JournalEvent::Reset {
                             at: now_wall,
                             target,
                             source: "control".to_string(),
-                        },
-                    );
+                        })
+                        .await
+                    {
+                        tracing::error!(source = %e, "reset aborted: journal unavailable");
+                        return;
+                    }
+                    let (t, c) = self.labels(i);
+                    self.tracker.clear(&t, &c);
                 } else if let Some(widx) = self.watches.iter().position(|w| w.name == target) {
-                    // watch 目标：按 watch 名清除其名下检查的 incident(第三轮 P2)
+                    // watch 目标：按 watch 名清除其名下检查的 incident(第三轮 P2)。
+                    // Journal 先行 + await 确认,与 service 分支同口径。
+                    if let Err(e) = h
+                        .journal_tx
+                        .send(JournalEvent::Reset {
+                            at: now_wall,
+                            target,
+                            source: "control".to_string(),
+                        })
+                        .await
+                    {
+                        tracing::error!(source = %e, "reset aborted: journal unavailable");
+                        return;
+                    }
                     for &i in &self.watches[widx].checks {
                         let (t, c) = self.labels(i);
                         self.tracker.clear(&t, &c);
                     }
-                    journal(
-                        h,
-                        JournalEvent::Reset {
-                            at: now_wall,
-                            target,
-                            source: "control".to_string(),
-                        },
-                    );
                 } else {
                     // 与 Check/Restart 一致：未知目标写审计 (第三轮 P2)
                     tracing::warn!(target = %target, "reset request: unknown target");
@@ -2347,12 +2376,19 @@ impl Scheduler {
             ControlCommand::Reload { path } => {
                 // F14 配置热重载:path 缺省 → 启动配置路径。读文件 + 校验失败：
                 // ERROR 日志 + journal Audit，旧配置原样生效 (绝不半应用)。
+                // Round-19 review P3: file read + validate (includes two
+                // canonicalize calls) run in spawn_blocking — the eval
+                // single-writer must not freeze on a slow/hung filesystem
+                // (diff/apply stay in-task by design).
                 let path = path
                     .map(PathBuf::from)
                     .unwrap_or_else(|| h.config_path.clone());
                 tracing::info!(path = %path.display(), "config reload requested");
-                match Config::from_path(&path) {
-                    Ok(new_cfg) => {
+                let load_path = path.clone();
+                let loaded =
+                    tokio::task::spawn_blocking(move || Config::from_path(&load_path)).await;
+                match loaded {
+                    Ok(Ok(new_cfg)) => {
                         if let Err(e) = self.apply_reload(new_cfg, h, now_mono, now_wall).await {
                             tracing::error!(
                                 path = %path.display(),
@@ -2368,7 +2404,7 @@ impl Scheduler {
                             );
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::error!(
                             path = %path.display(),
                             source = %e,
@@ -2379,6 +2415,20 @@ impl Scheduler {
                             JournalEvent::Audit {
                                 at: now_wall,
                                 message: format!("reload rejected: {e}"),
+                            },
+                        );
+                    }
+                    Err(join) => {
+                        tracing::error!(
+                            path = %path.display(),
+                            source = %join,
+                            "config reload rejected (load task failed); previous configuration remains active"
+                        );
+                        journal(
+                            h,
+                            JournalEvent::Audit {
+                                at: now_wall,
+                                message: format!("reload rejected: {join}"),
                             },
                         );
                     }
@@ -2803,6 +2853,37 @@ impl Scheduler {
             }
         }
         let _ = h.config_view_tx.send(Arc::new(view));
+
+        // Round-19 review P3: prune silences whose target no longer exists —
+        // a removed target's silence would linger invisibly until TTL expiry
+        // and silently re-suppress a same-named target added back later.
+        // Redefinition keeps the name, so its silence survives (audit drops
+        // make every removal visible). Namespaces mirror the silence-set
+        // validation: standalone check names + service names + watch names.
+        let known_targets: std::collections::HashSet<String> = self
+            .checks
+            .iter()
+            .filter(|c| c.bound_service.is_none() && c.bound_watch.is_none())
+            .map(|c| c.cfg.name.clone())
+            .chain(self.svcs.iter().map(|s| s.cfg.name.clone()))
+            .chain(self.watches.iter().map(|w| w.name.clone()))
+            .collect();
+        self.silences.retain(|target, _| {
+            let keep = known_targets.contains(target);
+            if !keep {
+                tracing::info!(target = %target, "silence dropped: target gone after reload");
+                journal(
+                    h,
+                    JournalEvent::Audit {
+                        at: now_wall,
+                        message: format!(
+                            "silence for target {target} discarded (target no longer exists after reload)"
+                        ),
+                    },
+                );
+            }
+            keep
+        });
 
         let summary = format!(
             "reload applied: +{}/-{}/~{} checks, +{}/-{}/~{} services, +{}/-{}/~{} watches",
@@ -5014,6 +5095,62 @@ mod tests {
         );
     }
 
+    /// 第十九轮评审 P3:reload 删除 target 后其静默必须剪除并写审计 ——
+    /// 否则条目滞留至 TTL 到期(不可见),同名 target 重新加入时静默复活。
+    #[tokio::test]
+    async fn reload_prunes_silences_of_removed_targets() {
+        let cfg = reload_test_cfg();
+        let (mut h, mut journal_rx, _sr, _mr) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+        let now = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
+
+        // 对存在的 target 建立静默 (走 silence 命令入口 = 同一校验路径)。
+        sched
+            .handle_control(
+                ControlCommand::Silence {
+                    target: "c1".into(),
+                    duration_secs: 3600,
+                    reason: None,
+                },
+                now,
+                wall,
+                &mut h,
+            )
+            .await;
+        assert!(sched.silences.contains_key("c1"));
+
+        // reload 移除 c1 → 静默剪除 + 审计。
+        let mut new_cfg = reload_test_cfg();
+        new_cfg.checks.retain(|c| c.name != "c1");
+        sched
+            .apply_reload(new_cfg, &mut h, now, wall)
+            .await
+            .expect("reload must succeed");
+        assert!(
+            !sched.silences.contains_key("c1"),
+            "被删 target 的静默必须剪除"
+        );
+        let evs = drain_journal(&mut journal_rx).await;
+        assert!(
+            audit_messages(&evs)
+                .iter()
+                .any(|m| m.contains("silence for target c1 discarded")),
+            "剪除必须写审计: {:?}",
+            audit_messages(&evs)
+        );
+
+        // 对照:同名 target 重新加入不得复活旧静默。
+        sched
+            .apply_reload(reload_test_cfg(), &mut h, now, wall)
+            .await
+            .expect("reload must succeed");
+        assert!(
+            !sched.silences.contains_key("c1"),
+            "同名 target 重新加入不得复活旧静默"
+        );
+    }
+
     /// 防御性断言：绕过校验的重名 Config → 整个 reload 拒绝，旧配置原样生效。
     #[tokio::test]
     async fn apply_reload_rejects_duplicate_names_defensively() {
@@ -5562,6 +5699,38 @@ mod tests {
             sample.report.probe_executed, published.probe_executed,
             "样本与发布报告同源"
         );
+    }
+
+    /// 第十九轮评审 P2:alert 三计数必须随 eval 报告发布 —— F18 环 / F39
+    /// 落盘 / F34 推送出口与 /metrics 同源,不再恒 0。
+    #[tokio::test]
+    async fn tick_metrics_carries_alert_counters() {
+        let cfg = reload_test_cfg();
+        let (mut h, _jr, _status_rx, _metrics_rx) = reload_handles();
+        let mut sched = Scheduler::build(&cfg);
+
+        // 直接驱动计数器 (分发任务不在测试内运行,投递计数无来源);
+        // 值本身来源无关 —— build_metrics 只读 Arc<AlertCounters>。
+        let counters = h.alert.counters();
+        counters
+            .sent
+            .fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+        counters
+            .delivery_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        counters
+            .dropped
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+
+        sched.tick(&mut h).await;
+
+        let published = h.metrics_tx.borrow().clone();
+        assert_eq!(published.alerts_sent, 3, "alerts_sent 随报告发布");
+        assert_eq!(published.alert_delivery_failures, 1);
+        assert_eq!(published.alerts_dropped, 2);
+        // 环内样本与发布报告同源 (F39 落盘行取自环 → 同样携带计数)。
+        let ring = published.history.lock().unwrap();
+        assert_eq!(ring.front().unwrap().report.alerts_sent, 3);
     }
 
     // -----------------------------------------------------------------

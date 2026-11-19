@@ -152,6 +152,13 @@ impl AlertQueue {
         self.len() == 0
     }
 
+    /// 告警管线计数 (第十九轮评审 P2):eval 侧 build_metrics 经此把三个
+    /// alert 计数填进 MetricsReport —— F18 环 / F39 落盘 / F34 推送出口
+    /// 与 /metrics 瞬时端点同源;/metrics 的实时覆盖层仍读同一 Arc。
+    pub fn counters(&self) -> Arc<AlertCounters> {
+        Arc::clone(&self.counters)
+    }
+
     /// 阻塞取一个事件;shutdown 信号为 true 时返回 None。
     ///
     /// shutdown sender 被 drop(`changed()` 返回 Err) 不算"继续等":视同上游已
@@ -212,6 +219,10 @@ pub async fn run_deadman(url: url::Url, mut shutdown: watch::Receiver<bool>) {
             return;
         }
     };
+    // First tick fires immediately (tokio interval semantics, kept on
+    // purpose): an instant startup heartbeat tells the receiver the agent is
+    // alive. The metrics pusher and spool requeue deliberately delay their
+    // first tick — heartbeat timing semantics differ (round-19 review note).
     let mut interval = tokio::time::interval(DEADMAN_INTERVAL);
     loop {
         if *shutdown.borrow() {

@@ -141,6 +141,15 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
     // 签名不变)。
     #[cfg(feature = "control-http")]
     let control_tls = if cfg.control.enabled {
+        // Round-19 review P3: a bearer token over plain HTTP travels in
+        // cleartext — warn once at assembly so the misconfiguration is
+        // visible without reading docs (loopback-only setups may accept it).
+        if cfg.control.token.is_some() && cfg.control.tls_cert.is_none() {
+            tracing::warn!(
+                listen = %cfg.control.listen,
+                "control plane bearer token configured without TLS; the token travels in plaintext HTTP — configure tls_cert/tls_key or restrict to loopback"
+            );
+        }
         crate::control::load_tls_config(
             cfg.control.tls_cert.as_deref(),
             cfg.control.tls_key.as_deref(),
@@ -168,7 +177,15 @@ pub async fn run_with_config(cfg: Config, config_path: Option<PathBuf>) -> Resul
     // ---- 准备:data_dir + journal 重放与可持久化预检 ----
     std::fs::create_dir_all(&cfg.agent.data_dir)?;
     let journal_path = cfg.agent.data_dir.join("journal.jsonl");
-    let replayed = journal::replay_checked(&journal_path)?;
+    // Round-19 review P3: replay reads both generations fully into memory
+    // (each up to journal_max_size; unbounded when rotation is disabled) —
+    // keep it off the async worker like open_writer below.
+    let replay_path = journal_path.clone();
+    let replayed = tokio::task::spawn_blocking(move || journal::replay_checked(&replay_path))
+        .await
+        .map_err(|e| {
+            crate::error::CoreError::Recover(format!("journal replay task failed: {e}"))
+        })??;
     let open_path = journal_path.clone();
     let journal_file = tokio::task::spawn_blocking(move || journal::open_writer(&open_path))
         .await

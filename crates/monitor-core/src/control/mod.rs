@@ -29,8 +29,8 @@
 //!   一致);`DELETE /v1/silence/{target}` → `ControlCommand::Unsilence` 入队
 //!   202 (提前解除)。两端点均在 protected 路由 (F23 鉴权自动生效)
 //! - `GET /v1/config`(F33 生效配置查看):返回 `Config::redacted()` JSON
-//!   快照 ([`ControlShared::config_view`],runtime 构造) —— token/签名密钥
-//!   以 `***redacted***` 占位，明文不出 agent;protected 路由 (F23 鉴权)
+//!   快照 ([`ControlShared::config_view`],runtime 构造) —— token/签名密钥/
+//!   投递头值 (F37) 以 `***redacted***` 占位，明文不出 agent;protected 路由 (F23 鉴权)
 //!
 //! ## 停机与 409 语义 (v0.1，如实记录)
 //!
@@ -101,12 +101,16 @@
 //! - **停机/轮换**:与 F32 同口径 (接受循环由 runtime abort;材料读入内存，
 //!   轮换 = 重启 agent)。
 
+// SocketAddr/Result are only consumed by the control-http serving paths
+// (feature-off builds would warn on unconditional imports).
+#[cfg(feature = "control-http")]
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{mpsc, watch};
 
 use crate::collect::CollectOutput;
+#[cfg(feature = "control-http")]
 use crate::error::Result;
 use crate::model::control::{ControlCommand, MetricsReport, StatusReport};
 
@@ -145,8 +149,8 @@ pub struct ControlShared {
     /// (gen1 行在前、当前文件行在后合并;更早代不存在 —— F24 只保留一代)。
     pub journal_path: std::path::PathBuf,
     /// F33:`GET /v1/config` 返回的生效配置视图 —— watch 接收端，初始值由
-    /// runtime 构造 (`serde_json::json!(cfg.redacted())`,token/签名密钥以
-    /// `***redacted***` 占位，其余原样);eval reload 成功后刷新新值。
+    /// runtime 构造 (`serde_json::json!(cfg.redacted())`,token/签名密钥/
+    /// 投递头值以 `***redacted***` 占位，其余原样);eval reload 成功后刷新新值。
     /// 控制平面只读透传，不持有明文密钥。
     pub config_view: watch::Receiver<Arc<serde_json::Value>>,
 }
@@ -551,6 +555,9 @@ async fn status(State(shared): State<Arc<ControlShared>>) -> Json<StatusReport> 
 /// 合并两路指标来源:eval watch 报告为基座,仅覆盖 alert 管道三字段。
 /// 以 eval 报告为基座使新增 MetricsReport 字段自动透传,不再需要逐字段拷贝
 /// (反向基座正是第九轮 P2 漏拷 uptime 的根因);F18 环形缓冲句柄亦随基座携带。
+/// 第十九轮 P2 后 eval 报告也携带 alert 三计数 (F18/F39/F34 出口同源);
+/// 此处的覆盖层改为**实时刷新**职责 —— 计数在两次 eval tick 之间变化时
+/// /metrics 仍即时反映,不等到下一轮发布。
 #[cfg(feature = "control-http")]
 fn merged_metrics(shared: &ControlShared) -> MetricsReport {
     let mut report = (*shared.metrics_rx.borrow().clone()).clone();
@@ -924,11 +931,11 @@ async fn journal(
 
 /// `GET /v1/config` (F33 生效配置查看):返回 [`ControlShared::config_view`] ——
 /// `Config::redacted()` JSON 视图 (启动快照;eval reload 成功后刷新)。token /
-/// webhook 签名密钥 (全局与路由级) 以 `***redacted***` 占位，**明文不出
-/// agent**;其余字段原样 (TLS 路径原样)。视图反映当前进程持有的配置：要求
-/// 重启的段 (control/alert/collect/…) 恒为启动值，目标拓扑热重载后刷新。
-/// 占位值不可回灌：写回配置文件会把字面量 `***redacted***` 当作真实密钥。
-/// 受 F23 鉴权 (protected 路由)。
+/// webhook 签名密钥 (全局与路由级) 与投递头值 (F37,文档化凭据注入口) 以
+/// `***redacted***` 占位，**明文不出 agent**;其余字段原样 (TLS 路径原样)。
+/// 视图反映当前进程持有的配置：要求重启的段 (control/alert/collect/…) 恒为
+/// 启动值，目标拓扑热重载后刷新。占位值不可回灌：写回配置文件会把字面量
+/// `***redacted***` 当作真实密钥。受 F23 鉴权 (protected 路由)。
 #[cfg(feature = "control-http")]
 async fn config_view(State(shared): State<Arc<ControlShared>>) -> Json<serde_json::Value> {
     // Arc<ControlShared> 下拿不到 &mut receiver，用 borrow() (&self) 而非
@@ -2418,14 +2425,15 @@ mod tests {
     }
 
     /// `GET /v1/config`(F33):返回 `Config::redacted()` 快照 —— token /
-    /// webhook_secret / 路由级 secret 三类敏感字段以 `***redacted***` 占位
-    /// 且**不含明文**;非敏感字段 (webhook url) 原样透出。
+    /// webhook_secret / 路由级 secret / metrics.secret 与投递头值 (F37) 以
+    /// `***redacted***` 占位且**不含明文**;非敏感字段 (webhook url) 原样透出。
     #[tokio::test]
     async fn config_endpoint_returns_redacted_snapshot_without_secrets() {
         let cfg = crate::config::Config::from_toml_str(
             "[control]\ntoken = 'tok-plain'\n\n[alert]\nwebhook_secret = 'sec-plain'\n\
+             headers = { Authorization = 'hdr-plain' }\n\
              [[alert.routes]]\nmatch = '*'\nurl = 'https://hooks.example.com/x'\n\
-             secret = 'route-plain'\n\
+             secret = 'route-plain'\nheaders = { 'X-Team' = 'route-hdr-plain' }\n\
              [metrics]\nenabled = true\nurl = 'https://ep/push'\nsecret = 'push-plain'\n",
         )
         .unwrap();
@@ -2461,7 +2469,25 @@ mod tests {
             view["alert"]["routes"][0]["url"].as_str() == Some("https://hooks.example.com/x"),
             "非敏感字段原样"
         );
-        for secret in ["tok-plain", "sec-plain", "route-plain", "push-plain"] {
+        // F37:投递头值占位、头名保留 (端到端,第十九轮评审 P1)。
+        assert_eq!(
+            view["alert"]["headers"]["Authorization"].as_str(),
+            Some("***redacted***"),
+            "全局投递头值以占位符透出"
+        );
+        assert_eq!(
+            view["alert"]["routes"][0]["headers"]["X-Team"].as_str(),
+            Some("***redacted***"),
+            "路由投递头值以占位符透出"
+        );
+        for secret in [
+            "tok-plain",
+            "sec-plain",
+            "route-plain",
+            "push-plain",
+            "hdr-plain",
+            "route-hdr-plain",
+        ] {
             assert!(!body.contains(secret), "响应不得含明文 {secret},got {body}");
         }
         assert!(body.contains("***redacted***"), "占位符出现在响应中");

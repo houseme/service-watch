@@ -67,6 +67,9 @@ name = "example-http"
 kind = "http"                             # http | tcp | process
 url = "http://127.0.0.1:8080/healthz"     # required for http
 expected_status = "200-299"               # default 200-299 (inclusive)
+                                          # probes follow redirects (up to 10): a 302
+                                          # chain ending in the range counts as OK —
+                                          # point the url at the final endpoint for strict checks
 interval = "10s"                          # must be > timeout (enforced by config validation)
 timeout = "5s"
 

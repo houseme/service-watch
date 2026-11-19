@@ -18,6 +18,10 @@ use crate::model::alert::AlertEvent;
 
 /// spool 单文件名 (目录由 runtime 传入:`{data_dir}/spool`)。
 pub const SPOOL_FILE: &str = "pending.jsonl";
+/// 确认事务的 rename 中转名 (replace_pending 临时文件)。与 [`SPOOL_FILE`]
+/// 一同构成 spool 目录的保留路径面 (config 校验的 history_path 碰撞守卫
+/// 单一事实源，第十九轮评审 P3)。
+pub const SPOOL_TEMP_FILE: &str = "pending.jsonl.next";
 /// spool 事件最长保留期 (重放时超龄丢弃)。
 pub const SPOOL_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 /// 周期重放的节拍 (分发任务内)。
@@ -242,7 +246,7 @@ where
 }
 
 fn replace_pending(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let temporary = path.with_extension("jsonl.next");
+    let temporary = path.with_file_name(SPOOL_TEMP_FILE);
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)

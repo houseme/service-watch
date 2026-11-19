@@ -576,7 +576,7 @@ fresh 窗口)。
 | `GET /metrics` | 200 JSON | — | `?format=prometheus` 或 `Accept: text/plain` 得 Prometheus 文本 (前缀 `service_watch_`) |
 | `GET /metrics/history?range=<secs>` | 200 JSON | 400 非法 range | 缺省 300s，上限 7200s;>600 点降采样保留首尾 |
 | `GET /` | 200 text/html | — | 只读状态页 (页内 JS 每 2s 轮询 /status+/metrics) |
-| `GET /v1/config` | 200 JSON | — | 生效配置快照 (F33):token/签名密钥以 `***redacted***` 占位，其余原样;占位不可回灌配置;`monitorctl config` 消费 |
+| `GET /v1/config` | 200 JSON | — | 生效配置快照 (F33):token/签名密钥/投递头值以 `***redacted***` 占位，其余原样;占位不可回灌配置;`monitorctl config` 消费 |
 
 **鉴权 (F23，可选 Bearer 令牌)**:`[control] token` 配置后，除 `GET /health` 外
 上表全部端点 (含状态页 `GET /`) 要求 `Authorization: Bearer <token>`,缺失或

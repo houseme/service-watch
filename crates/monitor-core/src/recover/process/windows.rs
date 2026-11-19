@@ -263,7 +263,10 @@ pub enum ScmStartOutcome {
 /// SCM 操作抽象。生产实现:[`RealScmOps`](cfg(windows)+`scm-target`) 与
 /// [`UnavailableScmOps`](其余平台/feature 组合的诚实降级);测试注入假实现。
 /// 全部为同步方法：本地 SCM RPC 是毫秒级调用，且 `ProcessManager` 的
-/// stop/force_kill 本就是同步契约。
+/// stop/force_kill 本就是同步契约。已知取舍 (第十九轮评审注记):query 走在
+/// eval 单写者 tick 热路径 (is_running/scm_state/poll_exit) —— SCM 忙时
+/// (services.exe 批量启停) 单写者随之变慢,恢复 FSM 的内部截止靠 MAX_TICK
+/// 周期兜底追进,不死锁;如需隔离可后续包 spawn_blocking。
 pub trait ScmOps: Send + Sync + std::fmt::Debug {
     fn start(&self, service: &str) -> std::io::Result<ScmStartOutcome>;
     fn stop(&self, service: &str) -> std::io::Result<()>;
