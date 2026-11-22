@@ -29,41 +29,40 @@ tokio = { version = "1.54.1", features = [
     "io-util",
     "fs",
 ] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "1"
-thiserror = "2"
-tracing = "0.1"
-url = { version = "2", features = ["serde"] }
-async-trait = "0.1"
-sysinfo = "0.40"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-axum = "0.8"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.2.2"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+url = { version = "2.5.9", features = ["serde"] }
+async-trait = "0.1.92"
+sysinfo = "0.40.4"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+axum = "0.8.9"
 # F32 控制面 HTTPS (axum-server TLS acceptor;rustls provider 与 reqwest 同线)。
 # 版本核对 2026-11-18 (cargo search axum-server -> 0.9.2,axum 0.8 兼容线)。
-axum-server = { version = "0.9", features = ["tls-rustls"] }
+axum-server = { version = "0.9.2", features = ["tls-rustls"] }
 # F38 mTLS:客户端 CA PEM 解析 (纯 Rust;control-http feature 门控)。
 # 版本核对 2026-11-18 (cargo search rustls-pemfile -> 2.2.0)。
-rustls-pemfile = "2"
+rustls-pemfile = "2.2.0"
 # F38 mTLS:WebPkiClientVerifier / RootCertStore / ServerConfig 仅在 rustls
 # crate 本体 (axum-server 0.9.2 / reqwest 0.13.5 / rustls-pemfile 2.2.0 均无
 # 公开 re-export)。default-features = false + [std, tls12]:provider 经
 # builder_with_provider 显式传入 (不 install_default),aws-lc-rs 由 axum-server
 # tls-rustls / reqwest rustls feature 合并提供 —— 本声明不新增任何编译单元。
 # 版本核对 2026-11-18 (Cargo.lock rustls 0.23.46，与 axum-server/reqwest 同线)。
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
-
-clap = { version = "4", features = ["derive"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-libc = "0.2"
+rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12"] }
+clap = { version = "4.6.9", features = ["derive"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+libc = "0.2.191"
 # F29 webhook HMAC 签名 (notify-webhook feature 门控;纯 Rust，无 C 依赖)。
 # 版本核对 2026-11-18 (hmac 0.13.0 / sha2 0.11.1)。
 hmac = "0.13.0"
 sha2 = "0.11.1"
 # F32 测试：自签 TLS 证书生成 (纯 Rust;Windows CI 无 openssl CLI，测试内生成)。
 # 版本核对 2026-11-18 (cargo search rcgen -> 0.14.10)。
-rcgen = "0.14"
-windows-sys = "0.61"
+rcgen = "0.14.10"
+windows-sys = "0.61.2"
 # F15 Windows Service form (declared only by monitor-agent). A virtual workspace
 # manifest allows no [target.*] sections and optional deps can only be declared
 # in member manifests — the version is centralized here, while target-gating and
